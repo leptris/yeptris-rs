@@ -1,0 +1,15 @@
+[package]
+name = "yeptris"
+version = "0.1.0"
+edition = "2021"
+description = "Rust bindings for libyeptris — fast YAML 1.2 parsing, DOM, serialization"
+license = "MIT"
+readme = "README.adoc"
+repository = "https://github.com/leptris/yeptris-rs"
+homepage = "https://www.leptris.org"
+links = "yeptris"
+build = "build.rs"
+
+[dependencies]
+
+[dev-dependencies]

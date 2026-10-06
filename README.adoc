@@ -1,0 +1,66 @@
+= yeptris-rs
+
+Rust bindings for link:https://github.com/leptris/yeptris[libyeptris], the pure
+C11 YAML 1.2 parser with a document arena, zero-copy value views, and a
+byte-stable emitter — zero required runtime dependencies.
+
+This repository owns the publishable `yeptris` crate. It is the standalone
+binding repository for the engine — the same model as the
+link:https://github.com/leptris/leptris-rs[leptris-rs],
+link:https://github.com/leptris/yeptris-ruby[yeptris-ruby], and
+link:https://github.com/leptris/yeptris-py[yeptris-py] bindings: one engine,
+many binding repositories, each with its own CI and releases.
+
+== Usage
+
+[source,rust]
+----
+use yeptris::Document;
+
+let doc = Document::parse(b"name: yeptris\nlangs: [c, rust]\n").unwrap();
+let root = doc.first_root().unwrap();
+assert_eq!(root.get("name").unwrap().str(), Some("yeptris"));
+assert_eq!(root.get("langs").unwrap().items().count(), 2);
+----
+
+The C library is resolved at link time: set `YEPTRIS_LIB_PATH` (see
+`build.rs`) or install libyeptris on the library path. CI builds the engine
+from source and exports the variable.
+
+== Mapping to the C engine
+
+The crate is a binding, not a reimplementation. Rust types map onto the
+engine's opaque handles (`YeptrisDocument`, `YeptrisNode`) and every
+operation is a thin safe wrapper over the corresponding `yeptris_*` C
+function. The ownership contracts become types:
+
+* `Document<'input>` — the engine's value views are zero-copy slices INTO
+  the parsed buffer, so the document cannot outlive the bytes it parsed.
+  Dropping the `Document` frees the engine's arena in one call.
+* `Node<'doc>` — a borrowed view; `value()`/`str()`/`tag()`/`anchor()`
+  return zero-copy slices or UTF-8 strs with the document's lifetime.
+* `Error` mirrors `YeptrisStatus` one-to-one; messages (with line/column)
+  come from the engine's thread-local error channel.
+
+Scalar styles (`Style`), node kinds (`NodeKind`), anchors/aliases (with
+`alias_target`), tags, and multi-document streams (`---`) are all surfaced.
+
+== Development
+
+[source,bash]
+----
+cmake -B engine/build-shared -S /path/to/yeptris \
+  -DCMAKE_BUILD_TYPE=Release -DYEPTRIS_BUILD_SHARED=ON \
+  -DBUILD_TESTING=OFF -DYEPTRIS_BUILD_CLI=OFF -DYEPTRIS_BUILD_BENCHMARKS=OFF
+cmake --build engine/build-shared
+YEPTRIS_LIB_PATH=$PWD/engine/build-shared/src cargo test
+----
+
+CI runs the same flow on ubuntu and macOS (`cargo build`, `cargo test`,
+`cargo fmt --check`).
+
+== Versioning
+
+The crate versions in lockstep with the engine's minor lines (the
+yeptris-ruby model): the binding's major.minor tracks the engine ABI it
+binds, and the patch tracks the binding itself.

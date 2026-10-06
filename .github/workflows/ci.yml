@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout engine repository
+        uses: actions/checkout@v4
+        with:
+          repository: leptris/yeptris
+          ref: main
+          path: engine
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Build libyeptris shared library
+        shell: bash
+        run: |
+          cmake -B engine/build-shared -S engine \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYEPTRIS_BUILD_SHARED=ON -DYEPTRIS_BUILD_STATIC=OFF \
+            -DBUILD_TESTING=OFF -DYEPTRIS_BUILD_CLI=OFF \
+            -DYEPTRIS_BUILD_BENCHMARKS=OFF
+          cmake --build engine/build-shared --config Release
+          LIB=$(find engine/build-shared -type f -o -type l 2>/dev/null | grep -iE '(lib)?yeptris\.(dylib|so)$' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "ERROR: libyeptris shared library not found"
+            exit 1
+          fi
+          LIBDIR=$(cd "$(dirname "$LIB")" && pwd)
+          echo "YEPTRIS_LIB_PATH=$LIBDIR" >> "$GITHUB_ENV"
+          echo "Built: $LIB"
+      - name: cargo build
+        run: cargo build --workspace --verbose
+      - name: cargo test
+        run: cargo test --workspace --verbose
+      - name: cargo fmt
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
