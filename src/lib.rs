@@ -438,3 +438,200 @@ impl<'doc> Iterator for MapEntries<'doc> {
         entry
     }
 }
+
+/// The compiled-plan columnar walk (yeptris/plan.h).
+///
+/// A plan is compiled once from a strict-JSON spec and applied to a
+/// [`Document`] in a single C pass, producing typed columns:
+///
+/// ```
+/// use yeptris::plan::Plan;
+///
+/// let doc = yeptris::Document::parse(b"items:\n  - {id: 7, tag: x}\n").unwrap();
+/// let plan = Plan::compile(
+///     r#"{"kind":"map","path":"items","children":[
+///         {"name":"id","kind":"int"},{"name":"tag","kind":"str"}]}"#,
+/// ).unwrap();
+/// let cols = doc.plan_walk(&plan).unwrap();
+/// assert_eq!(cols.ints(0).unwrap(), &[7]);
+/// ```
+///
+/// The spec's leaf kinds are `int`, `float`, `str`, `bool`; `kind`
+/// is `"seq"` or `"map"` and `path` selects the rows container (a
+/// string, or an array of strings for a segmented path). Explicit
+/// null and missing leaves mark the slot null. BOOL columns read
+/// through [`PlanColumns::ints`] as 0/1, matching the engine's
+/// columnar contract.
+pub mod plan {
+    use crate::ffi;
+    use crate::{Document, Error};
+
+    /// A compiled plan. Owns the engine's plan handle; freed on drop.
+    pub struct Plan {
+        raw: ffi::YeptrisPlan,
+    }
+
+    impl Drop for Plan {
+        fn drop(&mut self) {
+            unsafe { ffi::yeptris_plan_free(self.raw) };
+        }
+    }
+
+    impl Plan {
+        /// Compile from a strict-JSON spec document.
+        pub fn compile(spec: &str) -> Result<Plan, Error> {
+            let mut st = ffi::YEPTRIS_OK;
+            let raw = unsafe {
+                ffi::yeptris_plan_compile(
+                    spec.as_ptr() as *const std::os::raw::c_char,
+                    spec.len(),
+                    &mut st,
+                )
+            };
+            if raw.is_null() {
+                Err(Error::from_status(st))
+            } else {
+                Ok(Plan { raw })
+            }
+        }
+
+        pub fn column_count(&self) -> usize {
+            unsafe { ffi::yeptris_plan_column_count(self.raw) }
+        }
+    }
+
+    /// A column's leaf kind.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PlanColumnKind {
+        Int,
+        Float,
+        Str,
+        Bool,
+    }
+
+    impl PlanColumnKind {
+        fn from_raw(k: std::os::raw::c_int) -> Option<PlanColumnKind> {
+            match k {
+                ffi::YEP_PLAN_INT => Some(PlanColumnKind::Int),
+                ffi::YEP_PLAN_FLOAT => Some(PlanColumnKind::Float),
+                ffi::YEP_PLAN_STR => Some(PlanColumnKind::Str),
+                ffi::YEP_PLAN_BOOL => Some(PlanColumnKind::Bool),
+                _ => None,
+            }
+        }
+    }
+
+    /// A string cell: a (ptr, len) view into the walked document.
+    /// The borrow lasts as long as the [`PlanColumns`] that produced
+    /// it (which borrows the document).
+    #[derive(Clone, Copy)]
+    pub struct PlanStr<'a> {
+        bytes: &'a [u8],
+    }
+
+    impl PlanStr<'_> {
+        pub fn as_bytes(&self) -> &[u8] {
+            self.bytes
+        }
+
+        pub fn as_str(&self) -> &str {
+            std::str::from_utf8(self.bytes).unwrap_or_default()
+        }
+    }
+
+    /// The columnar result of one walk. Borrowed from the document
+    /// (string cells view into it); freed on drop.
+    pub struct PlanColumns<'doc> {
+        raw: ffi::YeptrisPlanResult,
+        _doc: &'doc Document<'doc>,
+    }
+
+    impl Drop for PlanColumns<'_> {
+        fn drop(&mut self) {
+            unsafe { ffi::yeptris_plan_result_free(self.raw) };
+        }
+    }
+
+    impl PlanColumns<'_> {
+        pub fn rows(&self) -> usize {
+            unsafe { ffi::yeptris_plan_result_rows(self.raw) }
+        }
+
+        pub fn column_kind(&self, col: usize) -> Result<PlanColumnKind, Error> {
+            let k = unsafe { ffi::yeptris_plan_result_kind(self.raw, col) };
+            PlanColumnKind::from_raw(k).ok_or(Error::Arg)
+        }
+
+        /// INT and BOOL columns (bools read as 0/1).
+        pub fn ints(&self, col: usize) -> Result<&[i64], Error> {
+            self.column_kind(col)?;
+            let p = unsafe { ffi::yeptris_plan_result_ints(self.raw, col) };
+            if p.is_null() {
+                return Err(Error::Arg);
+            }
+            Ok(unsafe { std::slice::from_raw_parts(p, self.rows()) })
+        }
+
+        pub fn floats(&self, col: usize) -> Result<&[f64], Error> {
+            self.column_kind(col)?;
+            let p = unsafe { ffi::yeptris_plan_result_floats(self.raw, col) };
+            if p.is_null() {
+                return Err(Error::Arg);
+            }
+            Ok(unsafe { std::slice::from_raw_parts(p, self.rows()) })
+        }
+
+        /// STR columns: (ptr, len) views into the document.
+        pub fn strs(&self, col: usize) -> Result<Vec<PlanStr<'_>>, Error> {
+            if self.column_kind(col)? != PlanColumnKind::Str {
+                return Err(Error::Arg);
+            }
+            let p = unsafe { ffi::yeptris_plan_result_strs(self.raw, col) };
+            if p.is_null() {
+                return Err(Error::Arg);
+            }
+            let raw = unsafe { std::slice::from_raw_parts(p, self.rows()) };
+            Ok(raw
+                .iter()
+                .map(|s| PlanStr {
+                    bytes: unsafe {
+                        std::slice::from_raw_parts(
+                            s.p as *const u8,
+                            s.len,
+                        )
+                    },
+                })
+                .collect())
+        }
+
+        /// Per-column null markers: 1 = the row's leaf was null or
+        /// missing. Length equals `rows()`.
+        pub fn nulls(&self, col: usize) -> &[u8] {
+            let p = unsafe { ffi::yeptris_plan_result_nulls(self.raw, col) };
+            if p.is_null() || self.rows() == 0 {
+                return &[];
+            }
+            unsafe { std::slice::from_raw_parts(p, self.rows()) }
+        }
+    }
+
+    impl Document<'_> {
+        /// Apply a compiled plan to this document: typed columns,
+        /// one C pass, no per-node host dispatch. The result borrows
+        /// the document.
+        pub fn plan_walk(&self, plan: &Plan) -> Result<PlanColumns<'_>, Error> {
+            let mut st = ffi::YEPTRIS_OK;
+            let raw = unsafe {
+                ffi::yeptris_document_plan_walk(self.raw, plan.raw, &mut st)
+            };
+            if raw.is_null() {
+                Err(Error::from_status(st))
+            } else {
+                Ok(PlanColumns {
+                    raw,
+                    _doc: self,
+                })
+            }
+        }
+    }
+}

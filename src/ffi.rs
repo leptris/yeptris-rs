@@ -8,6 +8,24 @@ use std::os::raw::{c_char, c_int};
 
 pub type YeptrisDocument = *mut core::ffi::c_void;
 pub type YeptrisNode = *mut core::ffi::c_void;
+pub type YeptrisPlan = *mut core::ffi::c_void;
+pub type YeptrisPlanResult = *mut core::ffi::c_void;
+
+/* plan.h column kinds */
+pub type YeptrisPlanKind = c_int;
+pub const YEP_PLAN_INT: YeptrisPlanKind = 0;
+pub const YEP_PLAN_FLOAT: YeptrisPlanKind = 1;
+pub const YEP_PLAN_STR: YeptrisPlanKind = 2;
+pub const YEP_PLAN_BOOL: YeptrisPlanKind = 3;
+
+/* plan.h: the DOM leg's string column rows — (ptr,len) views into
+ * the document; the result borrows the document. */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct YeptrisPlanStr {
+    pub p: *const c_char,
+    pub len: usize,
+}
 
 /* YeptrisStatus (error.h) */
 pub type YeptrisStatus = c_int;
@@ -81,6 +99,30 @@ extern "C" {
     /* emit.h */
     pub fn yeptris_serialize(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
     pub fn yeptris_serialize_into(doc: YeptrisDocument, buf: *mut c_char, cap: usize) -> usize;
+
+    /* plan.h — the compiled-plan columnar walk */
+    pub fn yeptris_plan_compile(
+        spec: *const c_char,
+        len: usize,
+        status: *mut YeptrisStatus,
+    ) -> YeptrisPlan;
+    pub fn yeptris_plan_free(plan: YeptrisPlan);
+    pub fn yeptris_plan_column_count(plan: YeptrisPlan) -> usize;
+    pub fn yeptris_document_plan_walk(
+        doc: YeptrisDocument,
+        plan: YeptrisPlan,
+        status: *mut YeptrisStatus,
+    ) -> YeptrisPlanResult;
+    pub fn yeptris_plan_result_free(r: YeptrisPlanResult);
+    pub fn yeptris_plan_result_rows(r: YeptrisPlanResult) -> usize;
+    pub fn yeptris_plan_result_kind(r: YeptrisPlanResult, col: usize) -> c_int;
+    pub fn yeptris_plan_result_ints(r: YeptrisPlanResult, col: usize) -> *const i64;
+    pub fn yeptris_plan_result_floats(r: YeptrisPlanResult, col: usize) -> *const f64;
+    pub fn yeptris_plan_result_strs(
+        r: YeptrisPlanResult,
+        col: usize,
+    ) -> *const YeptrisPlanStr;
+    pub fn yeptris_plan_result_nulls(r: YeptrisPlanResult, col: usize) -> *const u8;
 
     /* memory */
     pub fn yeptris_free(p: *mut core::ffi::c_void);
