@@ -118,10 +118,7 @@ extern "C" {
     pub fn yeptris_plan_result_kind(r: YeptrisPlanResult, col: usize) -> c_int;
     pub fn yeptris_plan_result_ints(r: YeptrisPlanResult, col: usize) -> *const i64;
     pub fn yeptris_plan_result_floats(r: YeptrisPlanResult, col: usize) -> *const f64;
-    pub fn yeptris_plan_result_strs(
-        r: YeptrisPlanResult,
-        col: usize,
-    ) -> *const YeptrisPlanStr;
+    pub fn yeptris_plan_result_strs(r: YeptrisPlanResult, col: usize) -> *const YeptrisPlanStr;
     pub fn yeptris_plan_result_nulls(r: YeptrisPlanResult, col: usize) -> *const u8;
 
     /* memory */

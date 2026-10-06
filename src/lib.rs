@@ -594,12 +594,7 @@ pub mod plan {
             Ok(raw
                 .iter()
                 .map(|s| PlanStr {
-                    bytes: unsafe {
-                        std::slice::from_raw_parts(
-                            s.p as *const u8,
-                            s.len,
-                        )
-                    },
+                    bytes: unsafe { std::slice::from_raw_parts(s.p as *const u8, s.len) },
                 })
                 .collect())
         }
@@ -621,16 +616,11 @@ pub mod plan {
         /// the document.
         pub fn plan_walk(&self, plan: &Plan) -> Result<PlanColumns<'_>, Error> {
             let mut st = ffi::YEPTRIS_OK;
-            let raw = unsafe {
-                ffi::yeptris_document_plan_walk(self.raw, plan.raw, &mut st)
-            };
+            let raw = unsafe { ffi::yeptris_document_plan_walk(self.raw, plan.raw, &mut st) };
             if raw.is_null() {
                 Err(Error::from_status(st))
             } else {
-                Ok(PlanColumns {
-                    raw,
-                    _doc: self,
-                })
+                Ok(PlanColumns { raw, _doc: self })
             }
         }
     }
