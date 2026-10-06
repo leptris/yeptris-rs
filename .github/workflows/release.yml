@@ -1,0 +1,40 @@
+# Release pipeline for yeptris-rs (crates.io Trusted Publishing).
+#
+# Versions are the owner's decision: bump Cargo.toml through a merged
+# PR, then dispatch this workflow. It publishes whatever version main
+# carries and tags the release. No registry token is stored: cargo
+# exchanges the workflow's OIDC token with crates.io (Trusted
+# Publishing — configure leptris/yeptris-rs + release.yml as the
+# crate's publisher on crates.io).
+
+name: Release
+
+permissions:
+  contents: write
+  id-token: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Dry run
+        run: cargo publish --dry-run
+
+      - name: Publish (crates.io Trusted Publishing)
+        run: cargo publish
+
+      - name: Version
+        run: echo "V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" >> "$GITHUB_ENV"
+
+      - name: Tag and release
+        run: gh release create "v$V" --generate-notes --title "yeptris-rs v$V"
+        env:
+          GH_TOKEN: ${{ github.token }}
