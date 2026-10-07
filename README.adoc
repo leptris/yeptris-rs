@@ -62,5 +62,6 @@ CI runs the same flow on ubuntu and macOS (`cargo build`, `cargo test`,
 == Versioning
 
 The crate versions in lockstep with the engine's minor lines (the
-yeptris-ruby model): the binding's major.minor tracks the engine ABI it
+yeptris-ruby model): 0.6.0 is the first engine-0.6-ABI-tagged cut
+(engine v0.6.30); the binding's major.minor tracks the engine ABI it
 binds, and the patch tracks the binding itself.
