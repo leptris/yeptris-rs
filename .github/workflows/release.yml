@@ -1,11 +1,9 @@
-# Release pipeline for yeptris-rs (crates.io Trusted Publishing).
+# Release train for yeptris-rs (crates.io Trusted Publishing).
 #
 # Versions are the owner's decision: bump Cargo.toml through a merged
-# PR, then dispatch this workflow. It publishes whatever version main
-# carries and tags the release. No registry token is stored: cargo
-# exchanges the workflow's OIDC token with crates.io (Trusted
-# Publishing — configure leptris/yeptris-rs + release.yml as the
-# crate's publisher on crates.io).
+# PR, then dispatch. cargo exchanges the workflow's OIDC token with
+# crates.io (no registry secret; configure leptris/yeptris-rs +
+# release.yml as the crate's publisher on crates.io).
 
 name: Release
 
@@ -23,7 +21,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout engine repository
+        uses: actions/checkout@v4
+        with:
+          repository: leptris/yeptris
+          ref: main
+          path: engine
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the engine shared library
+        run: |
+          cmake -B engine/build-shared -S engine \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYEPTRIS_BUILD_SHARED=ON -DYEPTRIS_BUILD_STATIC=OFF \
+            -DBUILD_TESTING=OFF -DYEPTRIS_BUILD_CLI=OFF \
+            -DYEPTRIS_BUILD_BENCHMARKS=OFF
+          cmake --build engine/build-shared --config Release
+          LIB=$(find engine/build-shared -type f -o -type l 2>/dev/null | grep -iE '(lib)?yeptris\.(dylib|so)$' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "ERROR: libyeptris shared library not found"
+            exit 1
+          fi
+          LIBDIR=$(cd "$(dirname "$LIB")" && pwd)
+          echo "YEPTRIS_LIB_PATH=$LIBDIR" >> "$GITHUB_ENV"
+
+      - name: Test against the engine
+        run: cargo test --workspace
 
       - name: Dry run
         run: cargo publish --dry-run
