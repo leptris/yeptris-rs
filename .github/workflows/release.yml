@@ -1,25 +1,43 @@
-# Release train for yeptris-rs (crates.io Trusted Publishing).
+# Release pipeline for yeptris-rs (modeled on leptris-rs).
 #
-# Versions are the owner's decision: bump Cargo.toml through a merged
-# PR, then dispatch. cargo exchanges the workflow's OIDC token with
-# crates.io (no registry secret; configure leptris/yeptris-rs +
-# release.yml as the crate's publisher on crates.io).
+# On every push to main, release-plz:
+#   1. opens/updates a release PR with version bumps + changelog
+#      (conventional commits), and
+#   2. when that release PR merges, publishes to crates.io.
+#
+# Publishing uses crates.io TRUSTED PUBLISHING: the workflow's OIDC
+# token is exchanged for a registry token by crates-io-auth-action.
+# The crate must exist on crates.io first (manual first publish),
+# and the crate's Trusted Publisher must be registered:
+#   repo: leptris/yeptris-rs, workflow: release.yml
+#
+# GITHUB_TOKEN must be a PAT (LEPTRIS_CI_PAT_TOKEN) so the release
+# PR itself triggers CI — the default token does not recurse.
+#
+# yeptris-rs links libyeptris (YEPTRIS_LIB_PATH), so both the release
+# PR's verification and the publish build the engine from source first.
 
 name: Release
 
 permissions:
   contents: write
+  pull-requests: write
   id-token: write
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-  publish:
-    name: cargo publish
+  release-plz:
+    name: Release-plz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout engine repository
         uses: actions/checkout@v4
@@ -28,7 +46,8 @@ jobs:
           ref: main
           path: engine
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build the engine shared library
         run: |
@@ -46,19 +65,13 @@ jobs:
           LIBDIR=$(cd "$(dirname "$LIB")" && pwd)
           echo "YEPTRIS_LIB_PATH=$LIBDIR" >> "$GITHUB_ENV"
 
-      - name: Test against the engine
-        run: cargo test --workspace
+      - name: Exchange OIDC token for crates.io token
+        if: github.ref == 'refs/heads/main'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Dry run
-        run: cargo publish --dry-run
-
-      - name: Publish (crates.io Trusted Publishing)
-        run: cargo publish
-
-      - name: Version
-        run: echo "V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" >> "$GITHUB_ENV"
-
-      - name: Tag and release
-        run: gh release create "v$V" --generate-notes --title "yeptris-rs v$V"
+      - name: Run release-plz
+        uses: MarcoIeni/release-plz-action@v0.5
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.LEPTRIS_CI_PAT_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
