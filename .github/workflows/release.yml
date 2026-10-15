@@ -76,5 +76,10 @@ jobs:
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5
         env:
-          GITHUB_TOKEN: ${{ secrets.LEPTRIS_CI_PAT_TOKEN }}
+          # the default token has contents+PR write on THIS repo — the
+          # release PR needs nothing more. (A PAT would also make the
+          # release PR's own CI recurse; leptris-rs's LEPTRIS_CI_PAT_TOKEN
+          # is not configured on this repo, and the train's first runs
+          # failed on the empty secret's ref-creation denial.)
+          GITHUB_TOKEN: ${{ github.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
