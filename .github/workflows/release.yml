@@ -51,13 +51,16 @@ jobs:
 
       - name: Build the engine shared library
         run: |
-          cmake -B engine/build-shared -S engine \
+          # OUTSIDE the checkout: release-plz aborts on a dirty workdir,
+          # and cmake's build tree would dirty engine/ (the nightly's
+          # first train run). The engine build tree is scratch.
+          cmake -B "${{ runner.temp }}/engine-build" -S engine \
             -DCMAKE_BUILD_TYPE=Release \
             -DYEPTRIS_BUILD_SHARED=ON -DYEPTRIS_BUILD_STATIC=OFF \
             -DBUILD_TESTING=OFF -DYEPTRIS_BUILD_CLI=OFF \
             -DYEPTRIS_BUILD_BENCHMARKS=OFF
-          cmake --build engine/build-shared --config Release
-          LIB=$(find engine/build-shared -type f -o -type l 2>/dev/null | grep -iE '(lib)?yeptris\.(dylib|so)$' | head -1)
+          cmake --build "${{ runner.temp }}/engine-build" --config Release
+          LIB=$(find "${{ runner.temp }}/engine-build" -type f -o -type l 2>/dev/null | grep -iE '(lib)?yeptris\.(dylib|so)$' | head -1)
           if [ -z "$LIB" ]; then
             echo "ERROR: libyeptris shared library not found"
             exit 1
