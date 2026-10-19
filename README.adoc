@@ -11,6 +11,14 @@ link:https://github.com/leptris/yeptris-ruby[yeptris-ruby], and
 link:https://github.com/leptris/yeptris-py[yeptris-py] bindings: one engine,
 many binding repositories, each with its own CI and releases.
 
+Part of the yeptris program: *the best (multiple dimensions)
+YAML/JSON parser/builder ever* — conformance, performance,
+safety/hardening, API surfaces, transport correctness, and trust,
+held simultaneously, in C, Ruby, Rust, and JS. This binding is the
+thin safe Rust surface; the events/recorder API and a serde bridge
+are planned as the C ABI settles (the engine's PLAN.md, "The
+best-ever program").
+
 == Usage
 
 [source,rust]
