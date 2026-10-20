@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.2 by @[object]
+- The mission statement in the README by @[object]
+
+### Other
+
 - The mission statement in the README by @[object]
 
 ### Added
