@@ -11,5 +11,15 @@ links = "yeptris"
 build = "build.rs"
 
 [dependencies]
+serde = { version = "1", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["serde"]
+# The serde face: `Value` (serde_yaml's data model) plus `from_str` /
+# `to_string` for any `Serialize`/`Deserialize` type (teptris's
+# proposal — serde_yaml is archived and the seat is open). Opt out
+# with default-features = false for a zero-dependency DOM-only crate.
+serde = ["dep:serde"]
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }

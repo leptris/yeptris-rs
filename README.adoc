@@ -35,6 +35,33 @@ The C library is resolved at link time: set `YEPTRIS_LIB_PATH` (see
 `build.rs`) or install libyeptris on the library path. CI builds the engine
 from source and exports the variable.
 
+=== serde
+
+The default `serde` feature gives the `serde_yaml`-shaped surface over the
+same engine — `Value` (insertion-ordered mappings, `Tagged`, core-schema
+scalar resolution), `from_str`/`from_slice`/`from_value`, `to_string`
+(engine emitter via the bulk build API), and `to_value` for any
+`Serialize` type. serde_yaml is archived; this is the drop-in seat.
+
+[source,rust]
+----
+use serde::{Deserialize, Serialize};
+use yeptris::{from_str, to_string};
+
+#[derive(Serialize, Deserialize)]
+struct Config { name: String, port: u16 }
+
+let cfg: Config = from_str("name: engine\nport: 8080\n").unwrap();
+let yaml = to_string(&yeptris::to_value(&cfg).unwrap()).unwrap();
+----
+
+Two deliberate, documented divergences from serde_yaml/Psych, both
+YAML-1.2-spec positions: `<<` stays a literal mapping key (the spec
+removed merge keys; the engine's core-12 default), and a tag is
+preserved for `Value` but rejected by non-enum typed visitors (the
+serde_yaml contract). Build with `default-features = false` for the
+zero-dependency DOM-only crate.
+
 == Mapping to the C engine
 
 The crate is a binding, not a reimplementation. Rust types map onto the
