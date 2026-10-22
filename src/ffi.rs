@@ -56,6 +56,23 @@ pub const YEPTRIS_STYLE_DOUBLE_QUOTED: YeptrisScalarStyle = 3;
 pub const YEPTRIS_STYLE_LITERAL: YeptrisScalarStyle = 4;
 pub const YEPTRIS_STYLE_FOLDED: YeptrisScalarStyle = 5;
 
+/* dom.h: bulk build (12-byte entries, ABI-pinned) */
+pub const YEPTRIS_BUILD_SCALAR: u8 = 1;
+pub const YEPTRIS_BUILD_SEQ: u8 = 2;
+pub const YEPTRIS_BUILD_MAP: u8 = 3;
+pub const YEPTRIS_BUILD_END: u8 = 4;
+pub const YEPTRIS_BUILD_TAG: u8 = 5;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct YeptrisBuildEntry {
+    pub op: u8,
+    pub style: u8,
+    pub reserved: u16,
+    pub off: u32,
+    pub len: u32,
+}
+
 extern "C" {
     /* version.h */
     pub fn yeptris_version() -> *const c_char;
@@ -72,6 +89,14 @@ extern "C" {
 
     /* dom.h */
     pub fn yeptris_document_free(doc: YeptrisDocument);
+    pub fn yeptris_document_new() -> YeptrisDocument;
+    pub fn yeptris_document_build(
+        doc: YeptrisDocument,
+        entries: *const YeptrisBuildEntry,
+        count: usize,
+        blob: *const c_char,
+        blob_len: usize,
+    ) -> YeptrisStatus;
     pub fn yeptris_document_count(doc: YeptrisDocument) -> usize;
     pub fn yeptris_document_root(doc: YeptrisDocument, index: usize) -> YeptrisNode;
     pub fn yeptris_node_kind(node: YeptrisNode) -> YeptrisNodeKind;

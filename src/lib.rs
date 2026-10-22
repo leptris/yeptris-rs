@@ -16,9 +16,27 @@
 
 mod ffi;
 
+#[cfg(feature = "serde")]
+mod de;
+#[cfg(feature = "serde")]
+mod emit;
+#[cfg(feature = "serde")]
+mod ser;
+#[cfg(feature = "serde")]
+mod value;
+
 use std::ffi::{c_char, CStr};
 use std::fmt;
 use std::marker::PhantomData;
+
+#[cfg(feature = "serde")]
+pub use de::{from_slice, from_str, from_value, DeserError};
+#[cfg(feature = "serde")]
+pub use emit::to_string;
+#[cfg(feature = "serde")]
+pub use ser::{to_value, ToValueError};
+#[cfg(feature = "serde")]
+pub use value::{Mapping, Number, Tagged, Value};
 
 /// Error surfaced by every fallible binding call. Mirrors the
 /// `YeptrisStatus` codes from the C API.
@@ -109,7 +127,26 @@ pub struct Document<'input> {
     _input: PhantomData<&'input [u8]>,
 }
 
+impl Document<'static> {
+    /// An empty document for the dump lane ([`to_string`] builds into
+    /// one and serializes it through the engine emitter).
+    pub fn new() -> Result<Document<'static>> {
+        let raw = unsafe { ffi::yeptris_document_new() };
+        if raw.is_null() {
+            return Err(Error::Memory);
+        }
+        Ok(Document {
+            raw,
+            _input: PhantomData,
+        })
+    }
+}
+
 impl Document<'_> {
+    pub(crate) fn raw(&self) -> ffi::YeptrisDocument {
+        self.raw
+    }
+
     /// Parse YAML from bytes. Input must be UTF-8 (the engine
     /// validates and rejects ill-formed input with [`Error::Encoding`]).
     /// The engine borrows the buffer — hold it while the `Document`
