@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The serde_yaml-shaped face — Value, from_str, to_string by @[object]
+
+### Other
+
+- Release v0.6.2 by @[object]
+
 ### Other
 
 - Release v0.6.2 by @[object]
