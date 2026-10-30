@@ -499,6 +499,8 @@ impl<'doc> Iterator for MapEntries<'doc> {
 /// null and missing leaves mark the slot null. BOOL columns read
 /// through [`PlanColumns::ints`] as 0/1, matching the engine's
 /// columnar contract.
+pub mod cbor;
+pub mod json;
 pub mod plan {
     use crate::ffi;
     use crate::{Document, Error};
