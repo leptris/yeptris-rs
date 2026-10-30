@@ -8,9 +8,10 @@ use crate::ffi::{self, YeptrisBuildEntry};
 use crate::value::{resolve_plain, Number, Value};
 use crate::{Document, Error, Result};
 
-/// Serialize a [`Value`] to YAML (no trailing newline — serde_yaml
-/// parity). Rides the engine emitter via the bulk build API.
-pub fn to_string(value: &Value) -> Result<String> {
+/// Pack a [`Value`] into a fresh document through the bulk build API
+/// (the format-agnostic first half of the dump lane: the JSON and
+/// CBOR faces serialize the same build).
+pub(crate) fn build_document(value: &Value) -> Result<Document<'static>> {
     let mut b = Builder::default();
     b.push(value)?;
     let doc = Document::new()?;
@@ -26,6 +27,13 @@ pub fn to_string(value: &Value) -> Result<String> {
     if status != ffi::YEPTRIS_OK {
         return Err(Error::from_status(status));
     }
+    Ok(doc)
+}
+
+/// Serialize a [`Value`] to YAML (no trailing newline — serde_yaml
+/// parity). Rides the engine emitter via the bulk build API.
+pub fn to_string(value: &Value) -> Result<String> {
+    let doc = build_document(value)?;
     let s = doc.serialize_string()?;
     Ok(s.strip_suffix('\n').unwrap_or(&s).to_owned())
 }

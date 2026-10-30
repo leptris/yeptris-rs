@@ -4,7 +4,7 @@
 
 #![allow(non_camel_case_types, dead_code)]
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 
 pub type YeptrisDocument = *mut core::ffi::c_void;
 pub type YeptrisNode = *mut core::ffi::c_void;
@@ -120,6 +120,23 @@ extern "C" {
         key: *mut YeptrisNode,
         value: *mut YeptrisNode,
     ) -> c_int;
+
+    /* json.h */
+    pub fn yeptris_parse_json(
+        buf: *const c_char,
+        len: usize,
+        status: *mut YeptrisStatus,
+    ) -> YeptrisDocument;
+    pub fn yeptris_serialize_json(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
+
+    /* cbor.h */
+    pub fn yeptris_cbor_decode(
+        buf: *const c_void,
+        len: usize,
+        opts: u32,
+        status: *mut YeptrisStatus,
+    ) -> YeptrisDocument;
+    pub fn yeptris_cbor_encode(doc: YeptrisDocument, opts: u32, len: *mut usize) -> *mut c_void;
 
     /* emit.h */
     pub fn yeptris_serialize(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
