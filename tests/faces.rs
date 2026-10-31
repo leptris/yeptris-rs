@@ -95,8 +95,11 @@ fn cbor_struct_round_trip() {
 
 #[test]
 fn cbor_document_level_apis() {
-    // [1, 2] = 0x82 0x01 0x02
-    let doc = yeptris::Document::parse_cbor(&[0x82, 0x01, 0x02]).unwrap();
+    // [1, 2] = 0x82 0x01 0x02; the document BORROWS the input
+    // (zero-copy string views, cbors contract) -- the buffer binds
+    // first and outlives the document
+    let input = [0x82u8, 0x01, 0x02];
+    let doc = yeptris::Document::parse_cbor(&input).unwrap();
     let back = doc.serialize_cbor().unwrap();
     assert_eq!(back, vec![0x82, 0x01, 0x02]);
 }
@@ -104,5 +107,6 @@ fn cbor_document_level_apis() {
 #[test]
 fn cbor_malformed_carries_the_error() {
     // a definite-length string header claiming 9 bytes with none
-    assert!(yeptris::Document::parse_cbor(&[0x69]).is_err());
+    let bad = [0x69u8];
+    assert!(yeptris::Document::parse_cbor(&bad).is_err());
 }
