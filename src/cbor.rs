@@ -13,10 +13,14 @@ use crate::{Document, Error, Result};
 use crate::emit;
 use crate::ffi;
 
-impl Document<'_> {
-    /// Decode CBOR bytes into a document. The input is copied into
-    /// the engine's arena, so the returned document may outlive it.
-    pub fn parse_cbor(input: &[u8]) -> Result<Document<'static>> {
+impl<'a> Document<'a> {
+    /// Decode CBOR bytes into a document. The document BORROWS the
+    /// input: string values are zero-copy views over it, so it must
+    /// outlive the document (cbor.h's contract) - the same lifetime
+    /// `parse`/`parse_json` carry. The old `Document<'static>`
+    /// signature let callers drop the buffer while the views still
+    /// pointed into it: use-after-free on every later string read.
+    pub fn parse_cbor(input: &'a [u8]) -> Result<Document<'a>> {
         let mut status: ffi::YeptrisStatus = ffi::YEPTRIS_OK;
         let raw = unsafe {
             ffi::yeptris_cbor_decode(input.as_ptr() as *const c_void, input.len(), 0, &mut status)
