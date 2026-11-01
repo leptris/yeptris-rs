@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The JSON and CBOR faces by @[object]
+
+### Fixed
+
+- Parse_cbor borrows its input, like parse and parse_json by @[object]
+
+### Other
+
+- Release 0.6.54 (lockstep with the engine wave; first crates.io publish) by @[object]
+
+### Added
+
 - The serde_yaml-shaped face — Value, from_str, to_string by @[object]
 
 ### Other
