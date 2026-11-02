@@ -138,3 +138,18 @@ fn cbor_encode_unrepresentable_maps_to_not_representable() {
     let msg = err.message().unwrap_or_default();
     assert!(msg.contains("CBOR"), "message {msg:?} should mention CBOR");
 }
+
+#[test]
+fn yaml_serialize_unrepresentable_maps_to_not_representable() {
+    // the YAML face's twin of the two pins above: a FLOW-context
+    // anchor whose name carries an indicator byte (`?`) has no YAML
+    // spelling (writer.c's wr_anchor_check marks the document
+    // unserializable — anchors have no quoting syntax), and the NULL
+    // arrives with no status to convert, so the NULL verdict is the
+    // only signal
+    let doc = Document::parse(b"{k: &a?b v}").unwrap();
+    let err = doc.serialize().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::NotRepresentable);
+    let msg = err.message().unwrap_or_default();
+    assert!(msg.contains("YAML"), "message {msg:?} should mention YAML");
+}

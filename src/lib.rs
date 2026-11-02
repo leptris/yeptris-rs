@@ -264,11 +264,19 @@ impl Document<'_> {
 
     /// Serialize the whole stream to owned bytes (the emitter's
     /// canonical, byte-stable form).
+    ///
+    /// NULL here is the engine's no-spelling verdict (a document the
+    /// emitter cannot spell — e.g. a flow-context anchor whose name
+    /// carries an indicator byte, writer.c's unserializable mark —
+    /// fails the serialize rather than emitting a form that can never
+    /// re-parse; the NULL arrives with no status to convert), so it
+    /// maps to [`ErrorKind::NotRepresentable`], never
+    /// [`ErrorKind::Memory`].
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_serialize(self.raw, &mut len) };
         if raw.is_null() {
-            return Err(ErrorKind::Memory.into());
+            return Err(Error::not_representable("YAML"));
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw as *mut core::ffi::c_void) };

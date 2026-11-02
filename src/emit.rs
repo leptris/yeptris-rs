@@ -135,39 +135,86 @@ fn entry(op: u8) -> YeptrisBuildEntry {
 
 /// A string dumps PLAIN exactly when it re-parses as the same string
 /// under the loading schema AND carries no leading indicator or
-/// embedded structure byte the scanner would tokenize.
+/// embedded structure byte the scanner would tokenize. The refusal set
+/// mirrors the engine's plain-safety truth table (scan/scan.c's
+/// `yep_scan_plain_safe` plus the emitter's control-byte rule) so the
+/// dump lane cannot emit a plain form the engine itself would refuse
+/// to re-parse.
 pub(crate) fn plain_safe(s: &str) -> bool {
-    // C0 controls: LF/TAB are rejected outright (no plain spelling in
-    // a single scalar), and every other control byte has none either
-    // (the scanner reads it as garbage or folds it as a break) — ride
-    // the double-quoted escape lane
-    if s.is_empty()
-        || s.starts_with(' ')
-        || s.ends_with(' ')
-        || s.contains('\n')
-        || s.contains('\t')
-        || s.bytes().any(|b| b < 0x20)
-        || s.contains(": ")
-        || s.contains(" #")
-        || s.ends_with(':')
+    let b = s.as_bytes();
+    if b.is_empty()
+        || is_blank(b[0])
+        || is_blank(b[b.len() - 1])
+        // a LEADING U+FEFF re-parses as a document BOM and vanishes
+        // (scan.c: the emitted form must carry its escape); a
+        // mid-token BOM is content
+        || b.starts_with(b"\xef\xbb\xbf")
     {
         return false;
     }
-    let first = s.as_bytes()[0];
+    // the indicator head: none of these may open a plain scalar
     const FLOW: &[u8] = b",[]{}#&*!|>'\"%@`";
-    if FLOW.contains(&first) {
+    if FLOW.contains(&b[0]) {
         return false;
     }
     // "-?:": the BARE one-character forms are the indicators
     // themselves ("-" re-reads as a sequence entry, "?" as an
-    // explicit key) — glued forms ("-foo") are safe unless a blank
-    // follows the indicator ("- foo")
-    if (first == b'-' || first == b'?' || first == b':')
-        && (s.len() == 1 || s.as_bytes()[1] == b' ')
+    // explicit key) — glued forms ("-foo") are safe unless a BLANK
+    // (space OR tab) follows the indicator: "-\tx" re-reads as a
+    // sequence entry carrying "x"
+    if (b[0] == b'-' || b[0] == b'?' || b[0] == b':') && (b.len() == 1 || is_blank(b[1])) {
+        return false;
+    }
+    // the document markers: a plain "---"/"..." (or either as a
+    // prefix before a blank) re-reads as a document boundary at line
+    // start ("--- x" parses as the string "x", "... x" is a parse
+    // error); the glued "---x" is content
+    if (b.starts_with(b"---") || b.starts_with(b"..."))
+        && (b.len() == 3 || is_blank(b[3]) || b[3] == b'\n' || b[3] == b'\r')
     {
         return false;
     }
+    // the interior walk. Controls first: C0 (0x00..0x1F — the breaks
+    // LF/CR and TAB included) and DEL have no plain spelling the
+    // scanner accepts (it answers ENCODING); the C1 block
+    // U+0080..U+009F (raw NEL U+0085 re-reads as a break) and the
+    // plane-edge noncharacters U+FFFE/U+FFFF are refused by the same
+    // printability gate; raw LS/PS re-read as line breaks. Only the
+    // double-quoted escape lane survives any of them.
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c < 0x20 || c == 0x7f {
+            return false;
+        }
+        if c == 0xc2 && i + 1 < b.len() && (0x80..=0x9f).contains(&b[i + 1]) {
+            return false;
+        }
+        if c == 0xe2 && i + 2 < b.len() && b[i + 1] == 0x80 && (b[i + 2] & 0xfe) == 0xa8 {
+            return false;
+        }
+        if c == 0xef && i + 2 < b.len() && b[i + 1] == 0xbf && (b[i + 2] & 0xfe) == 0xbe {
+            return false;
+        }
+        // ':' ends a plain only before a BLANK or at the span's end
+        // ("a:\tb" re-reads as a mapping entry); '#' starts a comment
+        // after a BLANK ("a\t#b" re-reads as "a" + a comment). A
+        // leading '#' never gets here (the FLOW head already refused).
+        if c == b':' && (i + 1 == b.len() || is_blank(b[i + 1])) {
+            return false;
+        }
+        if c == b'#' && is_blank(b[i - 1]) {
+            return false;
+        }
+        i += 1;
+    }
     // the schema gate: a resolvable shape (null/bool/int/float) must
     // not ride plain — it would re-parse as another type
-    resolve_plain(s.as_bytes()) == Value::String(s.to_owned())
+    resolve_plain(b) == Value::String(s.to_owned())
+}
+
+/// The engine's blank class: space or TAB (a tab after "-"/":" or
+/// before "#" is structure exactly like a space).
+fn is_blank(c: u8) -> bool {
+    c == b' ' || c == b'\t'
 }
