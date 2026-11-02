@@ -1,6 +1,6 @@
 [package]
 name = "yeptris"
-version = "0.6.54"
+version = "0.6.55"
 edition = "2021"
 description = "Rust bindings for libyeptris — fast YAML 1.2 parsing, DOM, serialization"
 license = "MIT"
