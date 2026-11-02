@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Serialize NULL maps to NotRepresentable; plain_safe quotes bare indicators and controls by @[object]
+
+### Other
+
 - Release 0.6.55 (lockstep with the engine wave) by @[object]
 
 ### Added
