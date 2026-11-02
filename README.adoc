@@ -15,9 +15,10 @@ Part of the yeptris program: *the best (multiple dimensions)
 YAML/JSON parser/builder ever* — conformance, performance,
 safety/hardening, API surfaces, transport correctness, and trust,
 held simultaneously, in C, Ruby, Rust, and JS. This binding is the
-thin safe Rust surface; the events/recorder API and a serde bridge
-are planned as the C ABI settles (the engine's PLAN.md, "The
-best-ever program").
+thin safe Rust surface. The event face (the engine's pull model as a
+Rust `Iterator`) and the serde bridge are in; the recorder's bulk
+drain and the lazy per-document stream are the follow-ups (the
+engine's PLAN.md, "The best-ever program").
 
 == Usage
 
@@ -61,6 +62,43 @@ removed merge keys; the engine's core-12 default), and a tag is
 preserved for `Value` but rejected by non-enum typed visitors (the
 serde_yaml contract). Build with `default-features = false` for the
 zero-dependency DOM-only crate.
+
+=== streams
+
+`parse_stream` is the multi-document face at ruby/py parity
+(`load_stream` / `load_all`): every document in the stream, in order,
+as an eager `Vec<Value>`.
+
+[source,rust]
+----
+use yeptris::{parse_stream, Value};
+
+// the boundary law: a content-less document rides its boundary as
+// Value::Null (ruby's nil, py's None); a document-less stream is an
+// empty vec; a malformed document fails with the engine's position
+assert_eq!(
+    parse_stream(b"---\nfoo\n---\n").unwrap(),
+    vec![Value::String("foo".into()), Value::Null]
+);
+----
+
+=== events
+
+`yeptris::event::Puller` wraps the engine's pull model (events.h, the
+StAX-style cursor): one `next()` is one `yeptris_pull_next` call — no
+buffering, no allocation beyond the event view.
+
+[source,rust]
+----
+use yeptris::event::Puller;
+use yeptris::event::EventKind::*;
+
+let mut puller = Puller::new(b"a: 1\n---\nb: 2\n").unwrap();
+for ev in puller.events() {
+    let ev = ev?;
+    // kind(), value(), anchor(), tag(), line()/col() .. end marks
+}
+----
 
 == Mapping to the C engine
 
