@@ -33,11 +33,19 @@ impl Document<'_> {
     }
 
     /// Serialize the whole stream to canonical JSON bytes.
+    ///
+    /// Memory: the engine's buffer is copied before the free; the
+    /// returned `Vec` owns its bytes.
+    ///
+    /// NULL here is json.h's no-spelling verdict (a document with an
+    /// unspellable flow anchor has no JSON representation) — not an
+    /// allocation failure, so it maps to
+    /// [`ErrorKind::NotRepresentable`], never [`ErrorKind::Memory`].
     pub fn serialize_json(&self) -> Result<Vec<u8>> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_serialize_json(self.raw, &mut len) };
         if raw.is_null() {
-            return Err(ErrorKind::Memory.into());
+            return Err(Error::not_representable("JSON"));
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw as *mut core::ffi::c_void) };

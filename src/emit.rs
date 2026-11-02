@@ -137,11 +137,16 @@ fn entry(op: u8) -> YeptrisBuildEntry {
 /// under the loading schema AND carries no leading indicator or
 /// embedded structure byte the scanner would tokenize.
 pub(crate) fn plain_safe(s: &str) -> bool {
+    // C0 controls: LF/TAB are rejected outright (no plain spelling in
+    // a single scalar), and every other control byte has none either
+    // (the scanner reads it as garbage or folds it as a break) — ride
+    // the double-quoted escape lane
     if s.is_empty()
         || s.starts_with(' ')
         || s.ends_with(' ')
         || s.contains('\n')
         || s.contains('\t')
+        || s.bytes().any(|b| b < 0x20)
         || s.contains(": ")
         || s.contains(" #")
         || s.ends_with(':')
@@ -153,9 +158,13 @@ pub(crate) fn plain_safe(s: &str) -> bool {
     if FLOW.contains(&first) {
         return false;
     }
-    // "-?:": plain-safe when glued to non-space content ("-foo"), the
-    // indicator only tokenizes before a blank
-    if (first == b'-' || first == b'?' || first == b':') && s.len() > 1 && s.as_bytes()[1] == b' ' {
+    // "-?:": the BARE one-character forms are the indicators
+    // themselves ("-" re-reads as a sequence entry, "?" as an
+    // explicit key) — glued forms ("-foo") are safe unless a blank
+    // follows the indicator ("- foo")
+    if (first == b'-' || first == b'?' || first == b':')
+        && (s.len() == 1 || s.as_bytes()[1] == b' ')
+    {
         return false;
     }
     // the schema gate: a resolvable shape (null/bool/int/float) must

@@ -167,6 +167,22 @@ fn value_round_trip_preserves_bytes() {
 }
 
 #[test]
+fn dump_quotes_indicator_and_control_strings() {
+    // the bare indicators re-read as structure ("-" is a sequence
+    // entry, "?" an explicit key) and C0 controls have no plain
+    // spelling: every one must ride quoted and survive the round trip
+    for s in ["-", "?", ":", "a\u{1}b"] {
+        let text = to_string(&Value::String(s.into())).unwrap();
+        assert!(
+            text.contains('"'),
+            "{s:?} dumped unquoted: {text:?} — the re-parse cannot survive it"
+        );
+        let back: Value = from_str(&text).unwrap();
+        assert_eq!(back, Value::String(s.into()), "round-trip broke for {s:?}");
+    }
+}
+
+#[test]
 fn enum_externally_tagged() {
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     enum Mode {
