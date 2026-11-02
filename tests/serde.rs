@@ -169,14 +169,58 @@ fn value_round_trip_preserves_bytes() {
 #[test]
 fn dump_quotes_indicator_and_control_strings() {
     // the bare indicators re-read as structure ("-" is a sequence
-    // entry, "?" an explicit key) and C0 controls have no plain
-    // spelling: every one must ride quoted and survive the round trip
-    for s in ["-", "?", ":", "a\u{1}b"] {
+    // entry, "?" an explicit key) and the control/break bytes have no
+    // plain spelling: every one must ride quoted and survive the round
+    // trip. The blank after a bare indicator is BLANK (space or tab:
+    // "-\tx" re-reads as a sequence entry carrying "x" — the engine's
+    // blank class, mirrored from yep_scan_plain_safe); "---"/"... (as
+    // a whole or before a blank) re-read as document boundaries; DEL,
+    // the C1 block (NEL included), LS/PS and U+FFFE/U+FFFF are refused
+    // outright by the scanner's printability gate; a LEADING BOM
+    // vanishes on re-parse.
+    for s in [
+        "-",
+        "?",
+        ":",
+        "a\u{1}b", //
+        "-\tx",
+        "?\tx",
+        ":\tx",
+        "a:\tb",
+        "a\t#b", //
+        "---",
+        "--- x",
+        "... x", //
+        "a\u{7f}b",
+        "a\u{85}b",
+        "a\u{9f}b",
+        "a\u{2028}b",
+        "a\u{2029}b", //
+        "a\u{fffe}b",
+        "a\u{ffff}b",
+        "\u{feff}x",
+    ] {
         let text = to_string(&Value::String(s.into())).unwrap();
         assert!(
             text.contains('"'),
             "{s:?} dumped unquoted: {text:?} — the re-parse cannot survive it"
         );
+        let back: Value = from_str(&text).unwrap();
+        assert_eq!(back, Value::String(s.into()), "round-trip broke for {s:?}");
+    }
+}
+
+#[test]
+fn dump_keeps_glued_indicator_and_marker_strings_plain() {
+    // the refusal set's boundary: glued forms are CONTENT — "?x",
+    // ":name" ride plain (libyaml's Psych symbol dumps), "---x"/"...x"
+    // are not document markers — so they must stay plain (quoting them
+    // would be a fidelity regression). ("-5" rides the SCHEMA gate, not
+    // the indicator gate: it resolves as an int and is quoted by
+    // dump_quotes_resolvable_strings.)
+    for s in ["?x", ":name", "---x", "...x", "hello world", "a:b"] {
+        let text = to_string(&Value::String(s.into())).unwrap();
+        assert!(!text.contains('"'), "{s:?} was quoted: {text:?}");
         let back: Value = from_str(&text).unwrap();
         assert_eq!(back, Value::String(s.into()), "round-trip broke for {s:?}");
     }
