@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::value::Value;
-use crate::{Document, Error, Result};
+use crate::{Document, Error, ErrorKind, Result};
 
 use crate::emit;
 use crate::ffi;
@@ -37,7 +37,7 @@ impl Document<'_> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_serialize_json(self.raw, &mut len) };
         if raw.is_null() {
-            return Err(Error::Memory);
+            return Err(ErrorKind::Memory.into());
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw as *mut core::ffi::c_void) };
@@ -47,7 +47,7 @@ impl Document<'_> {
     /// Serialize to canonical JSON as an owned UTF-8 string.
     pub fn serialize_json_string(&self) -> Result<String> {
         let bytes = self.serialize_json()?;
-        String::from_utf8(bytes).map_err(|_| Error::Internal)
+        String::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Internal))
     }
 }
 
@@ -77,5 +77,5 @@ pub fn from_slice<T: DeserializeOwned>(s: &[u8]) -> std::result::Result<T, crate
 
 /// Serialize `T` to canonical JSON text.
 pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
-    serialize(&crate::ser::to_value(value).map_err(|_| Error::Arg)?)
+    serialize(&crate::ser::to_value(value).map_err(|_| ErrorKind::Arg)?)
 }

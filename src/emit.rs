@@ -6,7 +6,7 @@
 
 use crate::ffi::{self, YeptrisBuildEntry};
 use crate::value::{resolve_plain, Number, Value};
-use crate::{Document, Error, Result};
+use crate::{Document, Error, ErrorKind, Result};
 
 /// Pack a [`Value`] into a fresh document through the bulk build API
 /// (the format-agnostic first half of the dump lane: the JSON and
@@ -46,8 +46,8 @@ struct Builder {
 
 impl Builder {
     fn place(&mut self, op: u8, style: u8, bytes: &[u8]) -> Result<()> {
-        let off = u32::try_from(self.blob.len()).map_err(|_| Error::Arg)?;
-        let len = u32::try_from(bytes.len()).map_err(|_| Error::Arg)?;
+        let off = u32::try_from(self.blob.len()).map_err(|_| ErrorKind::Arg)?;
+        let len = u32::try_from(bytes.len()).map_err(|_| ErrorKind::Arg)?;
         self.blob.extend_from_slice(bytes);
         self.entries.push(YeptrisBuildEntry {
             op,

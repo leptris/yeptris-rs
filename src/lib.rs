@@ -38,10 +38,13 @@ pub use ser::{to_value, ToValueError};
 #[cfg(feature = "serde")]
 pub use value::{Mapping, Number, Tagged, Value};
 
-/// Error surfaced by every fallible binding call. Mirrors the
-/// `YeptrisStatus` codes from the C API.
+/// The failure KIND surfaced by every fallible binding call.
+/// Mirrors the `YeptrisStatus` codes from the C API. A kind without
+/// a message is the whole story for binding-side constructions
+/// (argument checks, host allocation); engine failures carry the
+/// engine's text — see [`Error`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub enum ErrorKind {
     Parse,
     Memory,
     Depth,
@@ -54,51 +57,81 @@ pub enum Error {
     Unknown(i32),
 }
 
+/// The error type: the kind plus the engine's message CAPTURED AT
+/// CONSTRUCTION (yeptris-rs#24). `yeptris_last_error` is
+/// thread-global and valid only immediately after a failure — an
+/// `Error` that stored nothing would display whichever call failed
+/// LAST on the thread. Every conversion from a status therefore
+/// snapshots the message here; binding-side constructions carry no
+/// message and Display falls back to the kind's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Error {
+    kind: ErrorKind,
+    message: Option<String>,
+}
+
 impl Error {
-    fn from_status(status: i32) -> Error {
-        match status {
-            ffi::YEPTRIS_ERROR_PARSE => Error::Parse,
-            ffi::YEPTRIS_ERROR_MEMORY => Error::Memory,
-            ffi::YEPTRIS_ERROR_DEPTH => Error::Depth,
-            ffi::YEPTRIS_ERROR_ENCODING => Error::Encoding,
-            ffi::YEPTRIS_ERROR_IO => Error::Io,
-            ffi::YEPTRIS_ERROR_ARG => Error::Arg,
-            ffi::YEPTRIS_ERROR_UNSUPPORTED => Error::Unsupported,
-            ffi::YEPTRIS_ERROR_INTERNAL => Error::Internal,
-            ffi::YEPTRIS_ERROR_SCHEMA => Error::Schema,
-            other => Error::Unknown(other),
-        }
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
     }
 
-    /// The engine's message for the most recent failing call on this
-    /// thread (with its line/column folded in when the engine
-    /// reported one). Valid only immediately after the failure.
-    pub fn message(&self) -> String {
+    /// The engine's message for this failure, captured when the
+    /// Error was built (with its line/column folded in when the
+    /// engine reported one). `None` for binding-side constructions.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    /// Snapshot the thread-global engine error NOW — the one moment
+    /// it is valid. Called on every status conversion.
+    fn from_status(status: i32) -> Error {
         let mut line: u32 = 0;
         let mut col: u32 = 0;
         let msg = unsafe { ffi::yeptris_last_error(&mut line, &mut col) };
         let text = if msg.is_null() {
-            format!("{:?}", self)
+            None
         } else {
-            unsafe { CStr::from_ptr(msg) }
-                .to_string_lossy()
-                .into_owned()
+            let text = unsafe { CStr::from_ptr(msg) }.to_string_lossy().into_owned();
+            if text.is_empty() {
+                None
+            } else if line != 0 {
+                Some(format!("{} (line {}, column {})", text, line, col))
+            } else {
+                Some(text)
+            }
         };
-        if line != 0 {
-            format!("{} (line {}, column {})", text, line, col)
-        } else {
-            text
-        }
+        let kind = match status {
+            ffi::YEPTRIS_ERROR_PARSE => ErrorKind::Parse,
+            ffi::YEPTRIS_ERROR_MEMORY => ErrorKind::Memory,
+            ffi::YEPTRIS_ERROR_DEPTH => ErrorKind::Depth,
+            ffi::YEPTRIS_ERROR_ENCODING => ErrorKind::Encoding,
+            ffi::YEPTRIS_ERROR_IO => ErrorKind::Io,
+            ffi::YEPTRIS_ERROR_ARG => ErrorKind::Arg,
+            ffi::YEPTRIS_ERROR_UNSUPPORTED => ErrorKind::Unsupported,
+            ffi::YEPTRIS_ERROR_INTERNAL => ErrorKind::Internal,
+            ffi::YEPTRIS_ERROR_SCHEMA => ErrorKind::Schema,
+            other => ErrorKind::Unknown(other),
+        };
+        Error { kind, message: text }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message())
+        match &self.message {
+            Some(text) => f.write_str(text),
+            None => write!(f, "{:?}", self.kind),
+        }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Error {
+        Error { kind, message: None }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -133,7 +166,7 @@ impl Document<'static> {
     pub fn new() -> Result<Document<'static>> {
         let raw = unsafe { ffi::yeptris_document_new() };
         if raw.is_null() {
-            return Err(Error::Memory);
+            return Err(ErrorKind::Memory.into());
         }
         Ok(Document {
             raw,
@@ -148,7 +181,7 @@ impl Document<'_> {
     }
 
     /// Parse YAML from bytes. Input must be UTF-8 (the engine
-    /// validates and rejects ill-formed input with [`Error::Encoding`]).
+    /// validates and rejects ill-formed input with [`ErrorKind::Encoding`]).
     /// The engine borrows the buffer — hold it while the `Document`
     /// lives.
     pub fn parse<'a>(input: &'a [u8]) -> Result<Document<'a>> {
@@ -194,7 +227,7 @@ impl Document<'_> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_serialize(self.raw, &mut len) };
         if raw.is_null() {
-            return Err(Error::Memory);
+            return Err(ErrorKind::Memory.into());
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw as *mut core::ffi::c_void) };
@@ -204,7 +237,7 @@ impl Document<'_> {
     /// Serialize to an owned UTF-8 string.
     pub fn serialize_string(&self) -> Result<String> {
         let bytes = self.serialize()?;
-        String::from_utf8(bytes).map_err(|_| Error::Internal)
+        String::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Internal))
     }
 }
 
@@ -502,6 +535,7 @@ impl<'doc> Iterator for MapEntries<'doc> {
 pub mod cbor;
 pub mod json;
 pub mod plan {
+    use super::{ErrorKind};
     use crate::ffi;
     use crate::{Document, Error};
 
@@ -598,7 +632,7 @@ pub mod plan {
 
         pub fn column_kind(&self, col: usize) -> Result<PlanColumnKind, Error> {
             let k = unsafe { ffi::yeptris_plan_result_kind(self.raw, col) };
-            PlanColumnKind::from_raw(k).ok_or(Error::Arg)
+            PlanColumnKind::from_raw(k).ok_or(ErrorKind::Arg).map_err(crate::Error::from)
         }
 
         /// INT and BOOL columns (bools read as 0/1).
@@ -606,7 +640,7 @@ pub mod plan {
             self.column_kind(col)?;
             let p = unsafe { ffi::yeptris_plan_result_ints(self.raw, col) };
             if p.is_null() {
-                return Err(Error::Arg);
+                return Err(ErrorKind::Arg.into());
             }
             Ok(unsafe { std::slice::from_raw_parts(p, self.rows()) })
         }
@@ -615,7 +649,7 @@ pub mod plan {
             self.column_kind(col)?;
             let p = unsafe { ffi::yeptris_plan_result_floats(self.raw, col) };
             if p.is_null() {
-                return Err(Error::Arg);
+                return Err(ErrorKind::Arg.into());
             }
             Ok(unsafe { std::slice::from_raw_parts(p, self.rows()) })
         }
@@ -623,11 +657,11 @@ pub mod plan {
         /// STR columns: (ptr, len) views into the document.
         pub fn strs(&self, col: usize) -> Result<Vec<PlanStr<'_>>, Error> {
             if self.column_kind(col)? != PlanColumnKind::Str {
-                return Err(Error::Arg);
+                return Err(ErrorKind::Arg.into());
             }
             let p = unsafe { ffi::yeptris_plan_result_strs(self.raw, col) };
             if p.is_null() {
-                return Err(Error::Arg);
+                return Err(ErrorKind::Arg.into());
             }
             let raw = unsafe { std::slice::from_raw_parts(p, self.rows()) };
             Ok(raw

@@ -1,6 +1,6 @@
 //! Integration tests: the safe surface against a real engine build.
 
-use yeptris::{Document, Error, NodeKind, Style};
+use yeptris::{Document, Error, ErrorKind, NodeKind, Style};
 
 #[test]
 fn parse_scalar_styles() {
@@ -114,10 +114,30 @@ fn folded_value_borrows_arena() {
 #[test]
 fn parse_errors_surface() {
     let err = Document::parse(b"a: [1,\n").unwrap_err();
-    assert_eq!(err, Error::Parse);
-    assert!(!err.message().is_empty());
+    assert_eq!(err.kind(), ErrorKind::Parse);
+    assert!(err.message().is_some());
     let err = Document::parse(b"a: \xff\xfe\n").unwrap_err();
-    assert_eq!(err, Error::Encoding);
+    assert_eq!(err.kind(), ErrorKind::Encoding);
+}
+
+#[test]
+fn error_message_survives_later_calls() {
+    // yeptris-rs#24: the engine's text is captured at construction —
+    // yeptris_last_error is thread-global and only valid immediately
+    // after a failure, so a stored Error must never re-read it.
+    let err = Document::parse(b"a: [1,\n").unwrap_err();
+    let captured = err.message().expect("engine text captured").to_string();
+    assert!(captured.contains("(line "), "got: {captured}");
+    // a later successful parse rewrites the thread-global; the stored
+    // Error must still show its own message
+    let _ = Document::parse(b"ok: 1\n").unwrap();
+    assert_eq!(err.message().as_deref(), Some(captured.as_str()));
+    assert_eq!(err.kind(), ErrorKind::Parse);
+    // binding-side constructions carry no message; Display falls back
+    // to the kind's name
+    let bare: Error = ErrorKind::Arg.into();
+    assert_eq!(bare.message(), None);
+    assert_eq!(bare.to_string(), "Arg");
 }
 
 #[test]
