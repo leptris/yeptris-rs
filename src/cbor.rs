@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::value::Value;
-use crate::{Document, Error, Result};
+use crate::{Document, Error, ErrorKind, Result};
 
 use crate::emit;
 use crate::ffi;
@@ -40,7 +40,7 @@ impl<'a> Document<'a> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_cbor_encode(self.raw, 0, &mut len) };
         if raw.is_null() {
-            return Err(Error::Memory);
+            return Err(ErrorKind::Memory.into());
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw) };
@@ -68,5 +68,5 @@ pub fn from_slice<T: DeserializeOwned>(input: &[u8]) -> std::result::Result<T, c
 
 /// Serialize `T` to canonical CBOR bytes.
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    encode(&crate::ser::to_value(value).map_err(|_| Error::Arg)?)
+    encode(&crate::ser::to_value(value).map_err(|_| ErrorKind::Arg)?)
 }

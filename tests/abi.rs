@@ -5,7 +5,7 @@
 //! constants instead: the status mapping and node/style enums must
 //! match the engine's headers exactly.
 
-use yeptris::{version, Document, Error};
+use yeptris::{version, Document, Error, ErrorKind};
 
 #[test]
 fn version_is_semver_shaped() {
@@ -23,13 +23,13 @@ fn version_is_semver_shaped() {
 #[test]
 fn status_mapping_roundtrip() {
     // every code the engine header pins has a distinct variant
-    assert_ne!(Error::Parse, Error::Depth);
-    assert_ne!(Error::Memory, Error::Arg);
-    assert_ne!(Error::Encoding, Error::Io);
-    assert_ne!(Error::Unsupported, Error::Internal);
-    assert_ne!(Error::Schema, Error::Parse);
+    assert_ne!(ErrorKind::Parse, ErrorKind::Depth);
+    assert_ne!(ErrorKind::Memory, ErrorKind::Arg);
+    assert_ne!(ErrorKind::Encoding, ErrorKind::Io);
+    assert_ne!(ErrorKind::Unsupported, ErrorKind::Internal);
+    assert_ne!(ErrorKind::Schema, ErrorKind::Parse);
     // an unknown code carries through untouched
-    assert_eq!(Error::Unknown(42), Error::Unknown(42));
+    assert_eq!(ErrorKind::Unknown(42), ErrorKind::Unknown(42));
 }
 
 #[test]
