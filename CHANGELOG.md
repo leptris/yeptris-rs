@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Cargo fmt by @[object]
+- The Error captures the engine message at construction ([#24](https://github.com/leptris/yeptris-rs/pull/24)) by @[object]
+- Release v0.6.55 by @[object]
+
+### Other
+
 - Release 0.6.55 (lockstep with the engine wave) by @[object]
 
 ### Added
