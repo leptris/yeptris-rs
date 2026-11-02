@@ -91,7 +91,9 @@ impl Error {
         let text = if msg.is_null() {
             None
         } else {
-            let text = unsafe { CStr::from_ptr(msg) }.to_string_lossy().into_owned();
+            let text = unsafe { CStr::from_ptr(msg) }
+                .to_string_lossy()
+                .into_owned();
             if text.is_empty() {
                 None
             } else if line != 0 {
@@ -112,7 +114,10 @@ impl Error {
             ffi::YEPTRIS_ERROR_SCHEMA => ErrorKind::Schema,
             other => ErrorKind::Unknown(other),
         };
-        Error { kind, message: text }
+        Error {
+            kind,
+            message: text,
+        }
     }
 }
 
@@ -129,7 +134,10 @@ impl std::error::Error for Error {}
 
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Error {
-        Error { kind, message: None }
+        Error {
+            kind,
+            message: None,
+        }
     }
 }
 
@@ -535,7 +543,7 @@ impl<'doc> Iterator for MapEntries<'doc> {
 pub mod cbor;
 pub mod json;
 pub mod plan {
-    use super::{ErrorKind};
+    use super::ErrorKind;
     use crate::ffi;
     use crate::{Document, Error};
 
@@ -632,7 +640,9 @@ pub mod plan {
 
         pub fn column_kind(&self, col: usize) -> Result<PlanColumnKind, Error> {
             let k = unsafe { ffi::yeptris_plan_result_kind(self.raw, col) };
-            PlanColumnKind::from_raw(k).ok_or(ErrorKind::Arg).map_err(crate::Error::from)
+            PlanColumnKind::from_raw(k)
+                .ok_or(ErrorKind::Arg)
+                .map_err(crate::Error::from)
         }
 
         /// INT and BOOL columns (bools read as 0/1).

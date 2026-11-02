@@ -62,7 +62,10 @@ impl Value {
     /// Materialize a whole document (its first root). Errors on an
     /// empty stream.
     pub fn from_document(doc: &Document<'_>) -> Result<Value> {
-        let root = doc.first_root().ok_or(ErrorKind::Parse).map_err(crate::Error::from)?;
+        let root = doc
+            .first_root()
+            .ok_or(ErrorKind::Parse)
+            .map_err(crate::Error::from)?;
         let mut visiting = HashSet::new();
         Value::from_node_inner(root, &mut visiting)
     }
@@ -97,7 +100,9 @@ impl Value {
                 let mut items = Vec::with_capacity(node.seq_count());
                 for i in 0..node.seq_count() {
                     items.push(Value::from_node_inner(
-                        node.seq_at(i).ok_or(ErrorKind::Internal).map_err(crate::Error::from)?,
+                        node.seq_at(i)
+                            .ok_or(ErrorKind::Internal)
+                            .map_err(crate::Error::from)?,
                         visiting,
                     )?);
                 }
@@ -106,7 +111,10 @@ impl Value {
             NodeKind::Mapping => {
                 let mut map = Mapping::new();
                 for i in 0..node.map_count() {
-                    let (k, v) = node.map_at(i).ok_or(ErrorKind::Internal).map_err(crate::Error::from)?;
+                    let (k, v) = node
+                        .map_at(i)
+                        .ok_or(ErrorKind::Internal)
+                        .map_err(crate::Error::from)?;
                     let key = Value::from_node_inner(k, visiting)?;
                     let value = Value::from_node_inner(v, visiting)?;
                     map.insert(key, value);
@@ -114,7 +122,10 @@ impl Value {
                 Ok(tagged(Value::Mapping(map), &node))
             }
             NodeKind::Alias => {
-                let target = node.alias_target().ok_or(ErrorKind::Parse).map_err(crate::Error::from)?;
+                let target = node
+                    .alias_target()
+                    .ok_or(ErrorKind::Parse)
+                    .map_err(crate::Error::from)?;
                 let id = target.id();
                 if !visiting.insert(id) {
                     // The cycle guard pops on the way out; a hit here
