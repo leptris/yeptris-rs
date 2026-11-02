@@ -73,6 +73,47 @@ pub struct YeptrisBuildEntry {
     pub len: u32,
 }
 
+/* events.h — the pull model (StAX-style). The recorder/iterparse/
+ * push models stay undeclared until a face drives them. */
+pub type YeptrisPullParser = *mut core::ffi::c_void;
+
+/* YeptrisEventType (events.h), ABI-pinned order */
+pub type YeptrisEventType = c_int;
+pub const YEPTRIS_EV_STREAM_START: YeptrisEventType = 1;
+pub const YEPTRIS_EV_STREAM_END: YeptrisEventType = 2;
+pub const YEPTRIS_EV_DOCUMENT_START: YeptrisEventType = 3;
+pub const YEPTRIS_EV_DOCUMENT_END: YeptrisEventType = 4;
+pub const YEPTRIS_EV_SEQUENCE_START: YeptrisEventType = 5;
+pub const YEPTRIS_EV_SEQUENCE_END: YeptrisEventType = 6;
+pub const YEPTRIS_EV_MAPPING_START: YeptrisEventType = 7;
+pub const YEPTRIS_EV_MAPPING_END: YeptrisEventType = 8;
+pub const YEPTRIS_EV_SCALAR: YeptrisEventType = 9;
+pub const YEPTRIS_EV_ALIAS: YeptrisEventType = 10;
+
+/* YeptrisEvent (events.h): one event, string fields pointing into
+ * the owning model's storage (valid until the next pull call). The C
+ * `type` field is `kind` here — `type` is a Rust keyword; field names
+ * carry no ABI weight under repr(C). */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct YeptrisEvent {
+    pub kind: YeptrisEventType,
+    pub style: c_int,
+    pub flow: c_int,
+    pub explicit_marker: c_int,
+    pub implicit: c_int,
+    pub value: *const c_char,
+    pub value_len: usize,
+    pub anchor: *const c_char,
+    pub anchor_len: usize,
+    pub tag: *const c_char,
+    pub tag_len: usize,
+    pub line: u32,
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
 extern "C" {
     /* version.h */
     pub fn yeptris_version() -> *const c_char;
@@ -86,6 +127,21 @@ extern "C" {
 
     /* error.h */
     pub fn yeptris_last_error(line: *mut u32, col: *mut u32) -> *const c_char;
+
+    /* events.h — the pull model */
+    pub fn yeptris_pull_new(buf: *const c_char, len: usize) -> YeptrisPullParser;
+    pub fn yeptris_pull_next(pull: YeptrisPullParser) -> *const YeptrisEvent;
+    pub fn yeptris_pull_next_batch(
+        pull: YeptrisPullParser,
+        out: *mut YeptrisEvent,
+        max: usize,
+    ) -> usize;
+    pub fn yeptris_pull_status(
+        pull: YeptrisPullParser,
+        line: *mut u32,
+        col: *mut u32,
+    ) -> YeptrisStatus;
+    pub fn yeptris_pull_free(pull: YeptrisPullParser);
 
     /* dom.h */
     pub fn yeptris_document_free(doc: YeptrisDocument);

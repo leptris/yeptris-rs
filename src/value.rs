@@ -6,7 +6,7 @@
 //! merge keys, so `<<` stays a literal mapping key (the engine's
 //! core-12 default — Psych/serde_yaml expand it; we follow the spec).
 
-use crate::{Document, ErrorKind, Node, NodeKind, Result, Style};
+use crate::{ffi, Document, Error, ErrorKind, Node, NodeKind, Result, Style};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -66,6 +66,13 @@ impl Value {
             .first_root()
             .ok_or(ErrorKind::Parse)
             .map_err(crate::Error::from)?;
+        Value::from_root(root)
+    }
+
+    /// Materialize one document root (the stream face's per-document
+    /// leg): an empty root — the engine's synthesized empty scalar
+    /// for a content-less document — resolves to [`Value::Null`].
+    pub fn from_root(root: Node<'_>) -> Result<Value> {
         let mut visiting = HashSet::new();
         Value::from_node_inner(root, &mut visiting)
     }
@@ -89,7 +96,13 @@ impl Value {
             NodeKind::Scalar => {
                 let bytes = node.value().unwrap_or_default();
                 let style = node.style();
-                let resolved = if style == Style::Plain {
+                // ANY is the engine's recorded style for the SYNTHESIZED
+                // empty scalar (a content-less document, an empty `a:`
+                // value) — it is empty content, so it resolves by the
+                // schema like a plain scalar would (empty → Null, the
+                // nil-placement law; quoted empties keep their real
+                // style and stay strings)
+                let resolved = if style == Style::Plain || style == Style::Any {
                     resolve_plain(bytes)
                 } else {
                     Value::String(String::from_utf8_lossy(bytes).into_owned())
@@ -243,6 +256,51 @@ impl fmt::Display for Number {
             Number::F64(v) => write!(f, "{}", v),
         }
     }
+}
+
+/// Every document in the stream, in order (the load_all law, the
+/// ruby/py/ts shape at rs parity). One parse, one walk of the engine's
+/// DOM forest; the boundary placement is the other runtimes' law:
+///
+/// * single-document input yields the length-1 vec;
+/// * an empty document (a bare `---`, a comment-only document) rides
+///   its boundary as [`Value::Null`] — the engine synthesizes the
+///   empty scalar and the resolver makes it null;
+/// * an empty stream (no documents at all) yields the empty vec — the
+///   engine's NULL-document-and-OK verdict, not an error;
+/// * a malformed document fails the whole parse, and the error
+///   carries the engine's message with its line/column.
+///
+/// Eager [`Vec`] by choice (yeptris#886 slice 1): the engine's
+/// `yeptris_parse` returns the whole forest in one call, so there is
+/// nothing to defer — the lazy per-document form is iterparse's shape
+/// ([`crate::event::Puller`] drives the same engine event-at-a-time).
+pub fn parse_stream(input: &[u8]) -> Result<Vec<Value>> {
+    let mut status = ffi::YEPTRIS_OK;
+    let raw = unsafe {
+        ffi::yeptris_parse(
+            input.as_ptr() as *const std::os::raw::c_char,
+            input.len(),
+            &mut status,
+        )
+    };
+    if raw.is_null() {
+        if status == ffi::YEPTRIS_OK {
+            return Ok(Vec::new()); // the engine's empty-stream verdict
+        }
+        return Err(Error::from_status(status));
+    }
+    let doc = Document::from_raw(raw, input);
+    let count = doc.document_count();
+    let mut docs = Vec::with_capacity(count);
+    for i in 0..count {
+        let root = doc
+            .root(i)
+            .ok_or(ErrorKind::Internal)
+            .map_err(crate::Error::from)?;
+        docs.push(Value::from_root(root)?);
+    }
+    Ok(docs)
 }
 
 #[cfg(test)]

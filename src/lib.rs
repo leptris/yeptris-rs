@@ -25,6 +25,11 @@ mod ser;
 #[cfg(feature = "serde")]
 mod value;
 
+/// The event face: an `Iterator` over the engine's pull model
+/// (StAX-style — one `next()` is one FFI call, event strings are
+/// views valid until the next call).
+pub mod event;
+
 use std::ffi::{c_char, CStr};
 use std::fmt;
 use std::marker::PhantomData;
@@ -36,7 +41,7 @@ pub use emit::to_string;
 #[cfg(feature = "serde")]
 pub use ser::{to_value, ToValueError};
 #[cfg(feature = "serde")]
-pub use value::{Mapping, Number, Tagged, Value};
+pub use value::{parse_stream, Mapping, Number, Tagged, Value};
 
 /// The failure KIND surfaced by every fallible binding call.
 /// Mirrors the `YeptrisStatus` codes from the C API. A kind without
@@ -206,6 +211,16 @@ impl Document<'_> {
         self.raw
     }
 
+    /// Adopt a raw engine document (the stream face's constructor:
+    /// `yeptris_parse` hands back the whole forest; the NULL-and-OK
+    /// empty-stream verdict never reaches here).
+    pub(crate) fn from_raw<'a>(raw: ffi::YeptrisDocument, _input: &'a [u8]) -> Document<'a> {
+        Document {
+            raw,
+            _input: PhantomData::<&'a [u8]>,
+        }
+    }
+
     /// Parse YAML from bytes. Input must be UTF-8 (the engine
     /// validates and rejects ill-formed input with [`ErrorKind::Encoding`]).
     /// The engine borrows the buffer — hold it while the `Document`
@@ -300,7 +315,7 @@ pub enum Style {
 }
 
 impl Style {
-    fn from_raw(raw: ffi::YeptrisScalarStyle) -> Style {
+    pub(crate) fn from_raw(raw: ffi::YeptrisScalarStyle) -> Style {
         match raw {
             ffi::YEPTRIS_STYLE_PLAIN => Style::Plain,
             ffi::YEPTRIS_STYLE_SINGLE_QUOTED => Style::SingleQuoted,
