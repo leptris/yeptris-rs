@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Stream faces: parse_stream + the pull-model event iterator (yeptris#886) by @[object]
+
+### Other
+
 - Serialize NULL maps to NotRepresentable; plain_safe quotes bare indicators and controls by @[object]
 
 ### Other
