@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.58 by @[object]
+- Stream faces: parse_stream + the pull-model event iterator (yeptris#886) by @[object]
+
+### Other
+
 - Stream faces: parse_stream + the pull-model event iterator (yeptris#886) by @[object]
 
 ### Other
