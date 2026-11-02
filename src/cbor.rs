@@ -36,11 +36,16 @@ impl<'a> Document<'a> {
 
     /// Encode the document's first root to CBOR bytes (the engine's
     /// canonical form).
+    ///
+    /// NULL here is the engine's no-encoding verdict (an alias node
+    /// has no canonical CBOR item; the engine fails with UNSUPPORTED
+    /// and surfaces NULL) — not an allocation failure, so it maps to
+    /// [`ErrorKind::NotRepresentable`], never [`ErrorKind::Memory`].
     pub fn serialize_cbor(&self) -> Result<Vec<u8>> {
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_cbor_encode(self.raw, 0, &mut len) };
         if raw.is_null() {
-            return Err(ErrorKind::Memory.into());
+            return Err(Error::not_representable("CBOR"));
         }
         let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
         unsafe { ffi::yeptris_free(raw) };

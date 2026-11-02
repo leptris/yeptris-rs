@@ -54,6 +54,12 @@ pub enum ErrorKind {
     Unsupported,
     Internal,
     Schema,
+    /// The document has no representation in the target format. The
+    /// serialize calls return NULL with no status to convert (the
+    /// json.h contract: NULL document / allocation failure / zero
+    /// documents / unserializable) — under normal memory a NULL is
+    /// the no-spelling verdict, not an allocation failure.
+    NotRepresentable,
     Unknown(i32),
 }
 
@@ -73,6 +79,18 @@ pub struct Error {
 impl Error {
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// The serialize-NULL verdict: the engine's serialize returns NULL
+    /// with no status (json.h's contract), and under normal memory the
+    /// NULL means the document has no spelling in the target format —
+    /// an unspellable flow anchor has no JSON spelling, CBOR rejects
+    /// alias nodes. The message names the format (`what`).
+    pub(crate) fn not_representable(what: &str) -> Error {
+        Error {
+            kind: ErrorKind::NotRepresentable,
+            message: Some(format!("document is not representable as {}", what)),
+        }
     }
 
     /// The engine's message for this failure, captured when the

@@ -2,6 +2,7 @@
 //! Ruby bindings: one document model, three serializations.
 
 use serde::{Deserialize, Serialize};
+use yeptris::{Document, ErrorKind};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Repo {
@@ -109,4 +110,31 @@ fn cbor_malformed_carries_the_error() {
     // a definite-length string header claiming 9 bytes with none
     let bad = [0x69u8];
     assert!(yeptris::Document::parse_cbor(&bad).is_err());
+}
+
+// A serialize NULL is the engine's "no representation in this format"
+// verdict (yeptris/json.h pins it: NULL document / allocation failure
+// / zero documents / unserializable), NOT an allocation failure — the
+// old mapping to ErrorKind::Memory misled every caller.
+#[test]
+fn json_serialize_unrepresentable_maps_to_not_representable() {
+    // an anchor name carrying a flow indicator (`"`) has no JSON
+    // spelling: anchors cannot be quoted in flow, so the engine marks
+    // the document unserializable — under normal memory conditions
+    let doc = Document::parse(b"a: &\"x v\n").unwrap();
+    let err = doc.serialize_json().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::NotRepresentable);
+    let msg = err.message().unwrap_or_default();
+    assert!(msg.contains("JSON"), "message {msg:?} should mention JSON");
+}
+
+#[test]
+fn cbor_encode_unrepresentable_maps_to_not_representable() {
+    // an alias node has no canonical CBOR item (the engine fails with
+    // UNSUPPORTED and surfaces NULL) — under normal memory conditions
+    let doc = Document::parse(b"a: &x 1\nb: *x\n").unwrap();
+    let err = doc.serialize_cbor().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::NotRepresentable);
+    let msg = err.message().unwrap_or_default();
+    assert!(msg.contains("CBOR"), "message {msg:?} should mention CBOR");
 }
