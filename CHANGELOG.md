@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Cargo.toml rides the lockstep line too (0.6.57) by @[object]
+- The rs crate stays on the 0.6.x lockstep line (0.6.57, not 0.7.0) by @[object]
+- Release v0.7.0 by @[object]
+- Serialize NULL maps to NotRepresentable; plain_safe quotes bare indicators and controls by @[object]
+
+### Other
+
 - Serialize NULL maps to NotRepresentable; plain_safe quotes bare indicators and controls by @[object]
 
 ### Other
