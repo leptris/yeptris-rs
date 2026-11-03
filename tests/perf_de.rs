@@ -103,6 +103,8 @@ where
             let mut iters = 0usize;
             let start = Instant::now();
             while start.elapsed() < budget && iters < 20_000 {
+                // unit return is the point: the call must not be elided
+                #[allow(clippy::unit_arg)]
                 std::hint::black_box(closure(doc));
                 iters += 1;
             }
