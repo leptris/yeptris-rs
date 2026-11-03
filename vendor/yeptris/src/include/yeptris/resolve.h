@@ -46,6 +46,14 @@ typedef enum {
     YEPTRIS_SCHEMA_11_COMPAT,   /* libyaml/Psych implicit typing */
     YEPTRIS_SCHEMA_12_JSON,     /* spec 10.2: JSON productions; plain
                                  * scalars matching none are errors (#882) */
+    YEPTRIS_SCHEMA_12_FULL,     /* the full 1.2 family (#906 slice 3):
+                                 * core typing + RFC3339-era timestamps
+                                 * (spec 2.22's four forms; the yaml.org
+                                 * type repository carried forward) and
+                                 * the merge/value words; !!binary rides
+                                 * as passthrough. A validation family:
+                                 * explicit !!timestamp content must
+                                 * re-resolve through the classifier. */
 } YeptrisSchema;
 
 /* Canonical tag URI for a core id ("tag:yaml.org,2002:str"); NULL for

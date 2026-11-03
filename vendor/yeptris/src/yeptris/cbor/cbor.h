@@ -11,6 +11,16 @@
 extern "C" {
 #endif
 
+/* The semantic-tag chain law: decode renders the chain into a stack
+ * buffer; encode splits that text back into tag heads. ONE pair of
+ * constants governs both ends — the nightly's 23-nested-tags artifact
+ * (23 links decoded fine, encode-side tags[16] refused) was the two
+ * ends disagreeing. 64 links is already pathological (RFC 8949's
+ * registry is <20); a link renders up to 20 digits + separator, so
+ * the buffer holds a full 64-link chain. */
+#define YEP_CBOR_TAGBUF 1408
+#define YEP_CBOR_TAG_MAX_LINKS 64
+
 /* one data item: bytes -> the shared DOM (the plan's item 01) */
 /* One data item. consumed (may be NULL): when given, returns the
  * item's byte extent and TRAILING BYTES ARE NOT an error (the

@@ -326,14 +326,14 @@ typedef struct {
 /* Encodes one KEY item (tags + scalar) into exactly-sized scratch. */
 static uint8_t* cbor_encode_key(const yep_dom* d, const yep_dnode* key, size_t* out_len) {
     yep_view v = yep_dom_view(d, key->value);
-    size_t cap = 16 * 9 + 9 + v.len; /* tags + head + text */
+    size_t cap = (size_t)YEP_CBOR_TAG_MAX_LINKS * 9 + 9 + v.len; /* tags + head + text */
     uint8_t* buf = malloc(cap);
     if (buf == NULL) {
         return NULL;
     }
     size_t pos = 0;
-    uint64_t tags[16];
-    int ntags = cbor_tag_chain(d, key, tags, 16);
+    uint64_t tags[YEP_CBOR_TAG_MAX_LINKS];
+    int ntags = cbor_tag_chain(d, key, tags, YEP_CBOR_TAG_MAX_LINKS);
     if (ntags < 0) {
         goto bad;
     }
@@ -491,8 +491,8 @@ static size_t cbor_size_item(cenc* e, uint32_t id);
 static size_t cbor_size_scalar(cenc* e, const yep_dnode* n) {
     const yep_dom* d = e->d;
     size_t sz = 0;
-    uint64_t tags[16];
-    int ntags = cbor_tag_chain(d, n, tags, 16);
+    uint64_t tags[YEP_CBOR_TAG_MAX_LINKS];
+    int ntags = cbor_tag_chain(d, n, tags, YEP_CBOR_TAG_MAX_LINKS);
     if (ntags < 0) {
         e->failed = 1;
         e->status = YEPTRIS_ERROR_UNSUPPORTED;
@@ -534,8 +534,8 @@ static size_t cbor_size_item(cenc* e, uint32_t id) {
         return cbor_size_scalar(e, n); /* includes the node's own tags */
     }
     size_t sz = 0;
-    uint64_t tags[16];
-    int ntags = cbor_tag_chain(d, n, tags, 16);
+    uint64_t tags[YEP_CBOR_TAG_MAX_LINKS];
+    int ntags = cbor_tag_chain(d, n, tags, YEP_CBOR_TAG_MAX_LINKS);
     if (ntags < 0) {
         e->failed = 1;
         e->status = YEPTRIS_ERROR_UNSUPPORTED;
@@ -653,8 +653,8 @@ static void cbor_write_scalar(cenc* e, const yep_dnode* n, uint8_t* out, size_t*
 static void cbor_write_item(cenc* e, uint32_t id, uint8_t* out, size_t* pos) {
     const yep_dom* d = e->d;
     const yep_dnode* n = &d->nodes[id];
-    uint64_t tags[16];
-    int ntags = cbor_tag_chain(d, n, tags, 16);
+    uint64_t tags[YEP_CBOR_TAG_MAX_LINKS];
+    int ntags = cbor_tag_chain(d, n, tags, YEP_CBOR_TAG_MAX_LINKS);
     for (int t = 0; t < ntags; t++) {
         yep_cbor_put_head(out, pos, 6, tags[t]);
     }

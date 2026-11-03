@@ -25,6 +25,7 @@ extern "C" {
 #define YEP_ERROR_X(X)                                                                             \
     X(YEP_ERR_NONE, "no error")                                                                    \
     X(YEP_ERR_UNEXPECTED, "unexpected parser state")                                               \
+    X(YEP_ERR_DOC_BOUNDARY, "invalid content at a document boundary")                              \
     X(YEP_ERR_MEMORY, "out of memory")                                                             \
     X(YEP_ERR_DEPTH, "nesting depth exceeds the limit")                                            \
     X(YEP_ERR_ENCODING, "ill-formed or unsupported character encoding")                            \
@@ -33,6 +34,7 @@ extern "C" {
     X(YEP_ERR_BAD_INDENT, "inconsistent indentation")                                              \
     X(YEP_ERR_KEY_TOO_LONG, "simple key exceeds 1024 characters")                                  \
     X(YEP_ERR_UNDEFINED_ALIAS, "alias references an undefined anchor")                             \
+    X(YEP_ERR_ABORTED, "parse aborted by the event callback")                                      \
     X(YEP_ERR_INVALID_ESCAPE, "invalid escape sequence in double-quoted scalar")                   \
     X(YEP_ERR_BAD_DIRECTIVE, "invalid or unsupported directive")                                   \
     X(YEP_ERR_INTERNAL, "internal invariant violation")                                            \

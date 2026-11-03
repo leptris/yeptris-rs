@@ -1,7 +1,7 @@
 /* from_marshal.c — Ruby Marshal.dump bytes to ONE CBOR data item
  * (yeptris-ruby#322's CBOR half: the binding's dump face).
  *
- * The twin of emit/writer.c's marshal READER (yeptris_json_from_marshal):
+ * The twin of marshal/to_json.c's JSON reader (yeptris_json_from_marshal):
  * the Marshal stream is walked once, in C, and the CBOR item is
  * appended straight to the output — no per-node Ruby crossings, no
  * Document, no YAMLTree. The format facts mirror marshal.c's emission

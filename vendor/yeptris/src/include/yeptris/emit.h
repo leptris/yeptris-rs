@@ -24,7 +24,14 @@ extern "C" {
 #endif
 
 /* Emission options (13B). Versioned by size: initialize with
- * {sizeof(yeptris_emit_options)} so future fields stay optional. */
+ * {sizeof(yeptris_emit_options)} so future fields stay optional.
+ *
+ * Deliberately omitted: a flowLevel knob (libyaml's best_width +
+ * default_flow_style interplay). The engine's style chooser is
+ * recorded-style driven — flow is whatever the document recorded
+ * (plus the fixed canonical/JSON forms) — so there is no "switch to
+ * flow past level N" decision to expose; revisit only if a binding
+ * face actually needs PyYAML's default_flow_style mapping. */
 typedef struct yeptris_emit_options {
     uint32_t size;          /* sizeof(yeptris_emit_options) */
     int canonical;          /* fixed form: flow collections, quoted strings,
@@ -32,13 +39,34 @@ typedef struct yeptris_emit_options {
                              * output re-serializes byte-identically */
     int best_width;         /* 0 = library default (80): flow collections
                              * wrap after a value when the current line
-                             * exceeds the width (13B) */
+                             * exceeds the width (13B); with block_fold
+                             * it is also the fold column for block
+                             * scalars (#903) */
     int explicit_doc_start; /* nonzero: every document carries the
                              * leading --- marker (Psych/libyaml's
                              * implicit=false parity). Default 0: a
                              * single document is emitted bare. Only
                              * read when the caller's struct is large
                              * enough (size-versioned). */
+    int best_indent;        /* (#903) block indentation per level: the
+                             * content column of a nested block mapping
+                             * and the "- " item level. Out of range
+                             * (< 2 or > 9, libyaml's clamp) or 0 = the
+                             * library default 2. Only read when the
+                             * caller's struct is large enough. */
+    int block_fold;         /* (#903) nonzero: plain and single-quoted
+                             * scalars in block context fold at
+                             * best_width the way libyaml/Psych/PyYAML
+                             * do — at an interior single space past the
+                             * width the break replaces the space and
+                             * the continuation re-indents to
+                             * parent_col + best_indent. Default 0:
+                             * block output is width-invariant (byte-
+                             * identical with releases before the
+                             * option). Keys and flow members never
+                             * fold; canonical/JSON keep their fixed
+                             * forms. Only read when the caller's
+                             * struct is large enough. */
 } yeptris_emit_options;
 
 /* Options-aware entries; opts == NULL selects the fidelity mode

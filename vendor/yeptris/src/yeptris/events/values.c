@@ -175,6 +175,15 @@ static int transform(yep_value_ctx* c, const yep_rec_store* store) {
         case YEPTRIS_EV_SEQUENCE_START:
             v.kind = YEP_V_SEQ_OPEN;
             v.tag_id = r->tag_id;
+            if (r->tag_len != 0) {
+                /* the collection's explicit tag text rides the opens'
+                 * span fields (untagged containers keep off/len 0 —
+                 * the arena is not touched on the hot path): a host
+                 * constructor re-tags containers (!!set -> Python set,
+                 * !!omap -> pairs) without a second drain */
+                v.off = yep_val_arena_put(c, ra + r->tag_off, r->tag_len);
+                v.len = r->tag_len;
+            }
             yep_val_slot(c, &v);
             yep_val_put(c, &v);
             if (c->depth < YEP_V_MAX_DEPTH) {
@@ -186,6 +195,11 @@ static int transform(yep_value_ctx* c, const yep_rec_store* store) {
         case YEPTRIS_EV_MAPPING_START:
             v.kind = YEP_V_MAP_OPEN;
             v.tag_id = r->tag_id;
+            if (r->tag_len != 0) {
+                /* the set/omap tag text, exactly as the SEQ arm above */
+                v.off = yep_val_arena_put(c, ra + r->tag_off, r->tag_len);
+                v.len = r->tag_len;
+            }
             yep_val_slot(c, &v);
             yep_val_put(c, &v);
             if (c->depth < YEP_V_MAX_DEPTH) {
@@ -293,6 +307,16 @@ static int lin_node(yep_value_ctx* c, const yep_dom* d, uint32_t id) {
     }
     v.kind = n->kind == YEP_DOM_SEQUENCE ? YEP_V_SEQ_OPEN : YEP_V_MAP_OPEN;
     v.tag_id = n->tag_id;
+    if (n->tag.len != 0) {
+        /* route parity with the engine transform: the opens' span
+         * fields carry the explicit tag text there, so the linearizer
+         * must too (the routes stay byte-identical — values_priv.h's
+         * law). Marshal bails on tagged subtrees before this matters
+         * (#178); strict JSON carries no tags. */
+        yep_view tv = yep_dom_view(d, n->tag);
+        v.off = yep_val_arena_put(c, tv.p, (uint32_t)tv.len);
+        v.len = (uint32_t)tv.len;
+    }
     yep_val_slot(c, &v);
     yep_val_put(c, &v);
     if (c->depth < YEP_V_MAX_DEPTH) {

@@ -41,6 +41,58 @@ YEPTRIS_API YeptrisDocument yeptris_parse_ex(const char* buf, size_t len,
                                              const YeptrisParseOptions* opts,
                                              YeptrisStatus* status);
 
+/* ---- tolerant per-document stream iteration (#921) ----------------------
+ *
+ * load_stream parses the whole stream and aborts on the first bad
+ * document; this iterator frames documents engine-side (the abort-at-
+ * DOCUMENT_END run — scanner-accurate: a quoted scalar spanning a
+ * marker-looking line never splits) and reports failures PER DOCUMENT:
+ * a parse-class error surfaces as the step's status with NULL *out, the
+ * error channel carrying the failed document's own line/col (each run
+ * starts at the frame), and the iterator resynced to the next line-
+ * start marker — the host keeps calling and keeps the valid documents.
+ *
+ *   yeptris_stream_iter* it = yeptris_stream_iter_new(buf, len, &opts);
+ *   YeptrisDocument doc;
+ *   size_t index;
+ *   YeptrisStatus st;
+ *   while ((st = yeptris_stream_iter_next(it, &doc, &index)) == YEPTRIS_OK && doc != NULL) {
+ *       // doc is document `index` of the stream; free it with
+ *       // yeptris_document_free
+ *   }
+ *   // st == OK && doc == NULL: the stream is over; st != OK: document
+ *   // `index` failed (per-document line/col via
+ *   // yeptris_stream_iter_status), keep iterating.
+ *
+ * Memory: the caller owns each *out (yeptris_document_free). The
+ * iterator borrows `buf` until free. Each document parses twice (the
+ * boundary run + the slice parse) — the tolerance contract is the
+ * point; a single-pass upgrade rides the same seam when needed.
+ */
+typedef struct yeptris_stream_iter yeptris_stream_iter;
+
+/* The iterator borrows `buf` until free; `opts` is borrowed (may be
+ * NULL: the 12_CORE defaults). NULL on arg/alloc failure. */
+YEPTRIS_API yeptris_stream_iter* yeptris_stream_iter_new(const char* buf, size_t len,
+                                                         const YeptrisParseOptions* opts);
+
+/* The next document: OK + *out = the document (the caller frees it);
+ * a parse/DEPTH-class DOCUMENT failure: that status + *out = NULL +
+ * the error channel set for THAT document — the iterator has already
+ * resynced, keep calling; OK + *out = NULL: the stream is over;
+ * MEMORY/ENCODING: stream-fatal, the iterator is done. *index (may be
+ * NULL) is the 0-based stream document index this step consumed
+ * (failures consume an index too — the yield order is the stream's). */
+YEPTRIS_API YeptrisStatus yeptris_stream_iter_next(yeptris_stream_iter* it, YeptrisDocument* out,
+                                                   size_t* index);
+
+/* The LAST step's per-document verdict and its 1-based line/col
+ * (0/0 when the last step was a success or the stream end). */
+YEPTRIS_API YeptrisStatus yeptris_stream_iter_status(const yeptris_stream_iter* it, uint32_t* line,
+                                                     uint32_t* col);
+
+YEPTRIS_API void yeptris_stream_iter_free(yeptris_stream_iter* it);
+
 #ifdef __cplusplus
 }
 #endif
