@@ -1,8 +1,13 @@
 //! The serde deserialization face: `from_str` / `from_slice` /
-//! `from_value` — a `Deserializer` over the materialized [`Value`]
-//! tree (serde_yaml's architecture; a zero-copy event-stream
-//! deserializer is the measured follow-up per the perf ledger
-//! discipline).
+//! `from_value`.
+//!
+//! `from_str`/`from_slice` ride the DIRECT route: a `Deserializer`
+//! over the engine's DOM [`crate::Node`] (`de_node`, yeptris-rs#41) —
+//! one walk, no owned intermediate tree. The owned-`Value`
+//! `Deserializer` below (`ValueDeserializer`) stays as the fallback
+//! for owned-input paths (`from_value`) and as the semantics
+//! reference; `tests/differential.rs` pins both routes to identical
+//! values and identical error strings.
 
 use crate::value::{Mapping, Number, Tagged, Value};
 use crate::{Document, Error};
@@ -13,7 +18,7 @@ use serde::de::{
 use serde::Deserializer as _;
 
 #[derive(Debug)]
-pub struct DeserError(String);
+pub struct DeserError(pub(crate) String);
 
 impl std::fmt::Display for DeserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,8 +55,7 @@ pub fn from_slice<T: DeserializeOwned>(s: &[u8]) -> std::result::Result<T, Deser
             doc.document_count()
         )));
     }
-    let value = Value::from_document(&doc)?;
-    from_value(&value)
+    super::de_node::from_document(&doc)
 }
 
 /// Deserialize `T` from an owned [`Value`].

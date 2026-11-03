@@ -176,6 +176,11 @@ extern "C" {
         key: *mut YeptrisNode,
         value: *mut YeptrisNode,
     ) -> c_int;
+    /* dom.h: the bulk children drain — sequence items in order;
+     * mapping KEY,VALUE pairs interleaved. One sibling-chain walk;
+     * handles come from the document's pool (document_free reclaims
+     * them). out==NULL or cap==0 returns the count without filling. */
+    pub fn yeptris_node_children(node: YeptrisNode, out: *mut YeptrisNode, cap: usize) -> usize;
 
     /* json.h */
     pub fn yeptris_parse_json(
