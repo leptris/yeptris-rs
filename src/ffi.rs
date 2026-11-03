@@ -203,6 +203,28 @@ extern "C" {
     pub fn yeptris_serialize(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
     pub fn yeptris_serialize_into(doc: YeptrisDocument, buf: *mut c_char, cap: usize) -> usize;
 
+    /* parse.h — the tolerant per-document stream iterator (#921). The
+     * handle is opaque; opts NULL rides the parse defaults (the
+     * parse_stream contract). Frames are YeptrisDocuments the caller
+     * frees; failures carry the failed document's own line/col via
+     * _status and consume an index. */
+    pub fn yeptris_stream_iter_new(
+        buf: *const c_char,
+        len: usize,
+        opts: *const c_void,
+    ) -> *mut c_void;
+    pub fn yeptris_stream_iter_next(
+        it: *mut c_void,
+        out: *mut YeptrisDocument,
+        index: *mut usize,
+    ) -> YeptrisStatus;
+    pub fn yeptris_stream_iter_status(
+        it: *const c_void,
+        line: *mut u32,
+        col: *mut u32,
+    ) -> YeptrisStatus;
+    pub fn yeptris_stream_iter_free(it: *mut c_void);
+
     /* plan.h — the compiled-plan columnar walk */
     pub fn yeptris_plan_compile(
         spec: *const c_char,

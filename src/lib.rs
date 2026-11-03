@@ -43,7 +43,9 @@ pub use emit::to_string;
 #[cfg(feature = "serde")]
 pub use ser::{to_value, ToValueError};
 #[cfg(feature = "serde")]
-pub use value::{parse_stream, Mapping, Number, Tagged, Value};
+pub use value::{
+    each_document, parse_stream, EachDocument, Mapping, Number, StreamDocError, Tagged, Value,
+};
 
 /// The failure KIND surfaced by every fallible binding call.
 /// Mirrors the `YeptrisStatus` codes from the C API. A kind without
