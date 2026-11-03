@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Release v0.6.60 by @[object]
+
 ### Added
 
 - The tolerant each_document walk over the engine iterator ([#921](https://github.com/leptris/yeptris-rs/pull/921)) by @[object]
