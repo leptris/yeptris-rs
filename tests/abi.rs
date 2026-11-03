@@ -5,7 +5,7 @@
 //! constants instead: the status mapping and node/style enums must
 //! match the engine's headers exactly.
 
-use yeptris::{version, Document, Error, ErrorKind, ENGINE_REV};
+use yeptris::{version, Document, ErrorKind, ENGINE_REV};
 
 #[test]
 fn version_is_semver_shaped() {
