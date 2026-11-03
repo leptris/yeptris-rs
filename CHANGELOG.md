@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The tolerant each_document walk over the engine iterator ([#921](https://github.com/leptris/yeptris-rs/pull/921)) by @[object]
+- The vendored cargo feature — cc-crate engine build (yeptris-rs#40) by @[object]
+
+### Other
+
+- The vendored engine snapshot rides v0.6.60 by @[object]
+- Clippy-clean the #41 tree — unused Error import, unit_arg in the bench loop by @[object]
+- The deserializer drives the engine's DOM directly (yeptris-rs#41) by @[object]
+- Release v0.6.59 by @[object]
+
 ### Fixed
 
 - Document::serialize error class + plain_safe mirrors the engine truth table by @[object]
