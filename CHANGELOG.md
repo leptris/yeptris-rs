@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.59 by @[object]
+- Release v0.6.58 by @[object]
+
+### Fixed
+
+- Document::serialize error class + plain_safe mirrors the engine truth table by @[object]
+
+### Other
+
 - Release v0.6.58 by @[object]
 
 ### Other
