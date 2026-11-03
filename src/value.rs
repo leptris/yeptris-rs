@@ -342,6 +342,148 @@ pub fn parse_stream(input: &[u8]) -> Result<Vec<Value>> {
     Ok(docs)
 }
 
+/// One failed document of the tolerant walk ([`each_document`]): the
+/// failed document's OWN geometry (each frame parse starts at the
+/// frame, so the engine's line/col are the failed document's) and its
+/// 0-based stream index — failures consume an index, so the pair
+/// order is the stream's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDocError {
+    pub index: usize,
+    pub line: u32,
+    pub col: u32,
+    pub kind: ErrorKind,
+}
+
+impl fmt::Display for StreamDocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "stream document {}: at line {}, column {}",
+            self.index, self.line, self.col
+        )
+    }
+}
+
+/// The tolerant per-document walk (engine #921, rs#45): a lazy
+/// iterator of `Result<Value, StreamDocError>` in stream order —
+/// `Ok(value)` per valid document, `Err` per failed one. A
+/// parse-class failure carries the failed document's own line/col and
+/// its stream index, and the walk CONTINUES at the next line-start
+/// marker (the valid documents after a bad one are kept —
+/// [`parse_stream`] fails the whole stream instead). The stream-fatal
+/// classes (memory/encoding) yield their error and end the walk; an
+/// unrecoverable tail ends it. Nothing parses until iteration starts.
+/// Frames materialize through the same DOM route as
+/// [`parse_stream`]: one typing SSOT.
+///
+/// Requires libyeptris with the stream iterator (0.6.60+); on an
+/// older engine the FIRST iteration errors with
+/// [`ErrorKind::Unsupported`] — a link-time failure otherwise (the
+/// symbols are unresolved), which is why this is a runtime check.
+pub fn each_document(input: &[u8]) -> EachDocument<'_> {
+    let raw = unsafe {
+        ffi::yeptris_stream_iter_new(
+            input.as_ptr() as *const std::os::raw::c_char,
+            input.len(),
+            std::ptr::null(),
+        )
+    };
+    EachDocument {
+        raw,
+        input,
+        done: raw.is_null(),
+    }
+}
+
+/// The lazy iterator [`each_document`] returns (see its contract).
+pub struct EachDocument<'a> {
+    raw: *mut std::os::raw::c_void,
+    input: &'a [u8],
+    done: bool,
+}
+
+impl Drop for EachDocument<'_> {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe { ffi::yeptris_stream_iter_free(self.raw) };
+        }
+    }
+}
+
+impl Iterator for EachDocument<'_> {
+    type Item = std::result::Result<Value, StreamDocError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.raw.is_null() {
+            self.done = true;
+            return None;
+        }
+        // one engine step per item: the iterator resyncs INTERNALLY
+        // (a parse-class failure returns with the walk already landed
+        // on the next marker), so this body never spins
+        let mut doc: ffi::YeptrisDocument = std::ptr::null_mut();
+        let mut index: usize = 0;
+        let st = unsafe { ffi::yeptris_stream_iter_next(self.raw, &mut doc, &mut index) };
+        {
+            if st == ffi::YEPTRIS_OK {
+                if doc.is_null() {
+                    self.done = true; // the stream is over
+                    return None;
+                }
+                // materialize through the DOM route (the typing SSOT),
+                // then free the frame — the Value is fully owned
+                let frame = Document::from_raw(doc, self.input);
+                let value = match frame.first_root() {
+                    Some(root) => Value::from_root(root),
+                    None => Ok(Value::Null), // a bare marker rides Null
+                };
+                match value {
+                    Ok(v) => return Some(Ok(v)),
+                    Err(e) => {
+                        // the framing accepted what materialization
+                        // refused: report as the failed document
+                        let (line, col) = self.status();
+                        return Some(Err(StreamDocError {
+                            index,
+                            line,
+                            col,
+                            kind: e.kind(),
+                        }));
+                    }
+                }
+            }
+            let (line, col) = self.status();
+            let kind = match st {
+                ffi::YEPTRIS_ERROR_MEMORY => ErrorKind::Memory,
+                ffi::YEPTRIS_ERROR_DEPTH => ErrorKind::Depth,
+                ffi::YEPTRIS_ERROR_ENCODING => ErrorKind::Encoding,
+                _ => ErrorKind::Parse,
+            };
+            if st == ffi::YEPTRIS_ERROR_MEMORY || st == ffi::YEPTRIS_ERROR_ENCODING {
+                self.done = true; // stream-fatal: the iterator is done
+            }
+            return Some(Err(StreamDocError {
+                index,
+                line,
+                col,
+                kind,
+            }));
+        }
+    }
+}
+
+impl EachDocument<'_> {
+    fn status(&self) -> (u32, u32) {
+        let mut line: u32 = 0;
+        let mut col: u32 = 0;
+        unsafe {
+            ffi::yeptris_stream_iter_status(self.raw, &mut line, &mut col);
+        }
+        (line, col)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
