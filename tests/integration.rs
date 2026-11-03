@@ -131,7 +131,7 @@ fn error_message_survives_later_calls() {
     // a later successful parse rewrites the thread-global; the stored
     // Error must still show its own message
     let _ = Document::parse(b"ok: 1\n").unwrap();
-    assert_eq!(err.message().as_deref(), Some(captured.as_str()));
+    assert_eq!(err.message(), Some(captured.as_str()));
     assert_eq!(err.kind(), ErrorKind::Parse);
     // binding-side constructions carry no message; Display falls back
     // to the kind's name

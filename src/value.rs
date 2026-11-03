@@ -7,6 +7,7 @@
 //! core-12 default — Psych/serde_yaml expand it; we follow the spec).
 
 use crate::{ffi, Document, Error, ErrorKind, Node, NodeKind, Result, Style};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -93,22 +94,7 @@ impl Value {
             }
         };
         match node.kind() {
-            NodeKind::Scalar => {
-                let bytes = node.value().unwrap_or_default();
-                let style = node.style();
-                // ANY is the engine's recorded style for the SYNTHESIZED
-                // empty scalar (a content-less document, an empty `a:`
-                // value) — it is empty content, so it resolves by the
-                // schema like a plain scalar would (empty → Null, the
-                // nil-placement law; quoted empties keep their real
-                // style and stay strings)
-                let resolved = if style == Style::Plain || style == Style::Any {
-                    resolve_plain(bytes)
-                } else {
-                    Value::String(String::from_utf8_lossy(bytes).into_owned())
-                };
-                Ok(tagged(resolved, &node))
-            }
+            NodeKind::Scalar => Ok(tagged(scalar_to_value(resolve_scalar(node)), &node)),
             NodeKind::Sequence => {
                 let mut items = Vec::with_capacity(node.seq_count());
                 for i in 0..node.seq_count() {
@@ -153,32 +139,85 @@ impl Value {
     }
 }
 
+/// The resolved shape of one scalar, borrowing the document where the
+/// content is valid UTF-8. The SSOT for scalar typing: the owned
+/// [`Value`] walk (SSOT consumer: `from_node_inner`) and the Node
+/// serde route (`de_node`) both read through it.
+pub(crate) enum ScalarVal<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Uint(u64),
+    Float(f64),
+    Str(Cow<'a, str>),
+}
+
+/// The style gate + core-12 resolution for one scalar node. ANY is the
+/// engine's recorded style for the SYNTHESIZED empty scalar (a
+/// content-less document, an empty `a:` value) — it is empty content,
+/// so it resolves by the schema like a plain scalar would (empty →
+/// Null, the nil-placement law; quoted empties keep their real style
+/// and stay strings).
+pub(crate) fn resolve_scalar(node: Node<'_>) -> ScalarVal<'_> {
+    let bytes = node.value().unwrap_or_default();
+    let style = node.style();
+    if style == Style::Plain || style == Style::Any {
+        resolve_plain_ref(bytes)
+    } else {
+        ScalarVal::Str(Cow::Owned(String::from_utf8_lossy(bytes).into_owned()))
+    }
+}
+
+pub(crate) fn scalar_to_value(s: ScalarVal<'_>) -> Value {
+    match s {
+        ScalarVal::Null => Value::Null,
+        ScalarVal::Bool(b) => Value::Bool(b),
+        ScalarVal::Int(v) => Value::Number(Number::I64(v)),
+        ScalarVal::Uint(v) => Value::Number(Number::U64(v)),
+        ScalarVal::Float(v) => Value::Number(Number::F64(v)),
+        ScalarVal::Str(Cow::Borrowed(s)) => Value::String(s.to_owned()),
+        ScalarVal::Str(Cow::Owned(s)) => Value::String(s),
+    }
+}
+
+/// YAML 1.2 core-schema resolution for PLAIN scalars: null, bool,
+/// int (dec / `0o` / `0x`), float (`.inf`/`.nan`/decimal) — else a
+/// string. An empty plain scalar is null. Borrowing form of
+/// [`resolve_plain`].
+pub(crate) fn resolve_plain_ref(bytes: &[u8]) -> ScalarVal<'_> {
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return ScalarVal::Str(Cow::Owned(String::from_utf8_lossy(bytes).into_owned())),
+    };
+    match s {
+        "" | "~" | "null" | "Null" | "NULL" => return ScalarVal::Null,
+        "true" | "True" | "TRUE" => return ScalarVal::Bool(true),
+        "false" | "False" | "FALSE" => return ScalarVal::Bool(false),
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => {
+            return ScalarVal::Float(f64::INFINITY)
+        }
+        "-.inf" | "-.Inf" | "-.INF" => return ScalarVal::Float(f64::NEG_INFINITY),
+        ".nan" | ".NaN" | ".NAN" => return ScalarVal::Float(f64::NAN),
+        _ => {}
+    }
+    if let Some(n) = parse_yaml_int(s) {
+        return match n {
+            Number::I64(v) => ScalarVal::Int(v),
+            Number::U64(v) => ScalarVal::Uint(v),
+            Number::F64(_) => unreachable!("parse_yaml_int returns integral numbers"),
+        };
+    }
+    if let Some(Number::F64(f)) = parse_yaml_float(s) {
+        return ScalarVal::Float(f);
+    }
+    ScalarVal::Str(Cow::Borrowed(s))
+}
+
 /// YAML 1.2 core-schema resolution for PLAIN scalars: null, bool,
 /// int (dec / `0o` / `0x`), float (`.inf`/`.nan`/decimal) — else a
 /// string. An empty plain scalar is null.
 pub(crate) fn resolve_plain(bytes: &[u8]) -> Value {
-    let s = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return Value::String(String::from_utf8_lossy(bytes).into_owned()),
-    };
-    match s {
-        "" | "~" | "null" | "Null" | "NULL" => return Value::Null,
-        "true" | "True" | "TRUE" => return Value::Bool(true),
-        "false" | "False" | "FALSE" => return Value::Bool(false),
-        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => {
-            return Value::Number(Number::F64(f64::INFINITY))
-        }
-        "-.inf" | "-.Inf" | "-.INF" => return Value::Number(Number::F64(f64::NEG_INFINITY)),
-        ".nan" | ".NaN" | ".NAN" => return Value::Number(Number::F64(f64::NAN)),
-        _ => {}
-    }
-    if let Some(n) = parse_yaml_int(s) {
-        return Value::Number(n);
-    }
-    if let Some(n) = parse_yaml_float(s) {
-        return Value::Number(n);
-    }
-    Value::String(s.to_owned())
+    scalar_to_value(resolve_plain_ref(bytes))
 }
 
 fn digits_only(s: &str) -> bool {

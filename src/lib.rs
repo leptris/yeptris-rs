@@ -19,6 +19,8 @@ mod ffi;
 #[cfg(feature = "serde")]
 mod de;
 #[cfg(feature = "serde")]
+mod de_node;
+#[cfg(feature = "serde")]
 mod emit;
 #[cfg(feature = "serde")]
 mod ser;
@@ -510,6 +512,35 @@ impl<'doc> Node<'doc> {
             index: 0,
             count: self.map_count(),
         }
+    }
+
+    /// Bulk children drain (dom.h, crate-internal): sequence items in
+    /// order; mapping KEY,VALUE pairs interleaved. ONE sibling-chain
+    /// walk — the O(n) primitive. The per-index accessors
+    /// (`seq_at`/`map_at`) thrash the engine's last-container child
+    /// cache when a walk alternates between containers: every return
+    /// to the big parent rebuilds it, O(n) a time — quadratic overall
+    /// (engine #377 / ruby #168). Bulk walkers must use this.
+    pub(crate) fn children(&self) -> Vec<Node<'doc>> {
+        let count = match self.kind() {
+            NodeKind::Sequence => self.seq_count(),
+            NodeKind::Mapping => self.map_count() * 2,
+            _ => return Vec::new(),
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut raws: Vec<ffi::YeptrisNode> = Vec::with_capacity(count);
+        let filled = unsafe { ffi::yeptris_node_children(self.raw, raws.as_mut_ptr(), count) };
+        // `filled` cannot exceed `count` (both come from the same
+        // dnode); the guard only keeps set_len honest
+        unsafe { raws.set_len(filled.min(count)) };
+        raws.into_iter()
+            .map(|raw| Node {
+                raw,
+                _doc: PhantomData,
+            })
+            .collect()
     }
 }
 
