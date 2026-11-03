@@ -5,7 +5,7 @@
 //! constants instead: the status mapping and node/style enums must
 //! match the engine's headers exactly.
 
-use yeptris::{version, Document, Error, ErrorKind};
+use yeptris::{version, Document, Error, ErrorKind, ENGINE_REV};
 
 #[test]
 fn version_is_semver_shaped() {
@@ -17,6 +17,24 @@ fn version_is_semver_shaped() {
     assert!(
         parts.iter().take(2).all(|p| p.parse::<u64>().is_ok()),
         "version {v} major/minor not numeric"
+    );
+}
+
+#[test]
+fn vendored_rev_matches_compiled_engine() {
+    // Under `vendored`, the snapshot's ENGINE_REF pin (reported by
+    // build.rs) and the engine actually linked into this test binary
+    // must agree — they are one snapshot by construction, and the
+    // release tag carries the same version as project(VERSION), which
+    // build.rs cross-checked at build time.
+    let Some(rev) = ENGINE_REV else {
+        // the dynamic-link default: no snapshot claim to check
+        return;
+    };
+    let v = version();
+    assert!(
+        rev.contains(&format!("refs/tags/v{v}")),
+        "vendored rev {rev:?} does not pin the compiled engine version {v:?}"
     );
 }
 

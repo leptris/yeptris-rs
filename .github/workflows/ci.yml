@@ -56,3 +56,25 @@ jobs:
       - name: cargo fmt
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
+
+  # yeptris-rs#40: the vendored leg compiles the CHECKED-IN engine
+  # snapshot (vendor/yeptris/) via cc — no engine checkout, no
+  # YEPTRIS_LIB_PATH: exactly what a `cargo add yeptris --features
+  # vendored` consumer gets out of the box. Windows rides here too:
+  # the MSVC C11 shape (/std:c11 via cc's std, /experimental:c11atomics
+  # — the engine's own windows sentinel flags) is the surface risk the
+  # snapshot must prove on every refresh.
+  vendored:
+    name: cargo test --features vendored (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build --features vendored
+        run: cargo build --workspace --features vendored --verbose
+      - name: cargo test --features vendored
+        run: cargo test --workspace --features vendored --verbose

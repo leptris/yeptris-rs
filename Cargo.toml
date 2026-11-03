@@ -13,6 +13,12 @@ build = "build.rs"
 [dependencies]
 serde = { version = "1", default-features = false, features = ["std"], optional = true }
 
+[build-dependencies]
+# The vendored engine build (issue #40): compile the checked-in engine
+# snapshot into the crate. default-features off — no parallel-rs job
+# server, exactly the library's single-toolchain build shape.
+cc = { version = "1", default-features = false, optional = true }
+
 [features]
 default = ["serde"]
 # The serde face: `Value` (serde_yaml's data model) plus `from_str` /
@@ -20,6 +26,12 @@ default = ["serde"]
 # proposal — serde_yaml is archived and the seat is open). Opt out
 # with default-features = false for a zero-dependency DOM-only crate.
 serde = ["dep:serde"]
+# Compile the vendored engine snapshot (vendor/yeptris/, pinned by
+# vendor/yeptris/ENGINE_REF) into the crate and link it statically —
+# `cargo add yeptris` works with no libyeptris installed. OFF by
+# default: without it the crate links the installed engine (dynamic),
+# the CI-tested path.
+vendored = ["dep:cc"]
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

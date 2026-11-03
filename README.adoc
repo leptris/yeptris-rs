@@ -36,6 +36,45 @@ The C library is resolved at link time: set `YEPTRIS_LIB_PATH` (see
 `build.rs`) or install libyeptris on the library path. CI builds the engine
 from source and exports the variable.
 
+=== Vendored engine (`vendored` feature)
+
+Without the engine installed, build with the opt-in `vendored` feature:
+the crate compiles its CHECKED-IN engine snapshot (`vendor/yeptris/`)
+through the `cc` crate and links it statically — no libyeptris on the
+machine, no network access, nothing fetched at build time:
+
+[source,bash]
+----
+cargo add yeptris --features vendored
+# or in Cargo.toml: yeptris = { version = "0.6", features = ["vendored"] }
+----
+
+The snapshot is the engine repository's own tree (`src/`, the top-level
+`CMakeLists.txt`, `LICENSE.md`), exported with `git archive` at the
+release recorded in `vendor/yeptris/ENGINE_REF`; the build script
+reports it as `yeptris::ENGINE_REV` (e.g. `refs/tags/v0.6.59
+(636d0329…)`) and cross-checks the tag against the snapshot's
+`project(VERSION)`. The engine's own files stay the single source of
+truth: build.rs parses the TU list out of the snapshot's
+`src/CMakeLists.txt` and generates `version.h` from `project(VERSION)`
++ `version.h.in` exactly as CMake does, so a refresh needs no build.rs
+edits. The snapshot refreshes as ONE unit:
+
+[source,bash]
+----
+# in the engine checkout, at the release tag to vendor:
+git archive <ref> src CMakeLists.txt LICENSE.md | tar -x -C /tmp/snap
+# in yeptris-rs: replace vendor/yeptris/{src,CMakeLists.txt,LICENSE.md}
+#   with /tmp/snap's contents, then update ENGINE_REF:
+#     ref    refs/tags/<ref>
+#     commit <git rev-parse <ref>>
+cargo build --features vendored && cargo test --features vendored
+----
+
+`vendored` is OFF by default: the default build links the installed
+engine dynamically (the CI-tested path). When the feature is on it
+takes precedence — `YEPTRIS_LIB_PATH` is ignored.
+
 === serde
 
 The default `serde` feature gives the `serde_yaml`-shaped surface over the

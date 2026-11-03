@@ -1,0 +1,29 @@
+/* version.h — generated from the CMake project VERSION.
+ *
+ * CMakeLists.txt project(yeptris VERSION ...) is the single source of truth;
+ * scripts/bump-version.sh syncs vcpkg.json and CHANGELOG.md from it. Never
+ * hand-edit the generated file (it lives in the build tree).
+ */
+#ifndef YEPTRIS_VERSION_H
+#define YEPTRIS_VERSION_H
+
+#include <yeptris/api.h>
+
+#define YEPTRIS_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define YEPTRIS_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define YEPTRIS_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define YEPTRIS_VERSION_STRING "@PROJECT_VERSION@"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Returns the library version string ("major.minor.patch").
+ * Memory: static storage; valid for the lifetime of the process. */
+YEPTRIS_API const char* yeptris_version(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* YEPTRIS_VERSION_H */

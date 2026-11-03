@@ -1,0 +1,11 @@
+# The engine release this vendored snapshot was exported from.
+#
+# The snapshot tree (src/, CMakeLists.txt, LICENSE.md) is the engine
+# repository's own files, exported with `git archive <ref>` — never
+# hand-edited. build.rs reports this file as YEPTRIS_ENGINE_REV and
+# cross-checks the tag against the snapshot's CMakeLists.txt
+# project(VERSION): the whole snapshot refreshes as ONE unit.
+#
+# Refresh procedure: README.adoc, "Vendored engine snapshot".
+ref refs/tags/v0.6.59
+commit 636d0329fe226b7356c550f3e01f02159c0979c9
