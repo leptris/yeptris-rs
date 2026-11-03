@@ -51,7 +51,6 @@ typedef enum {
 typedef struct {
     uint32_t col;
     uint8_t kind;
-    uint8_t inline_doc; /* opened on the --- line: deeper keys only */
 } yep_frame;
 
 struct yep_engine {
@@ -162,7 +161,8 @@ struct yep_engine {
                                                            overflow crasher) */
     int last_root_flow;                                 /* a root-level flow node just completed */
     int tag_undef;                                      /* an unresolved !handle! was seen (QLJ7) */
-    int doc_inline;                                     /* content node opened on the --- line */
+    int doc_inline;      /* the node opens on the --- line: block collections
+                          * refuse there (the marker-line law, #900) */
     uint32_t flow_floor; /* parent column of the current block-level flow */
     int flow_enforce;    /* flow continuation lines must out-indent it */
     int compat_grammar;  /* 11-COMPAT: libyaml/psych grammar parity —
@@ -218,6 +218,14 @@ static int e_fail(yep_engine* e, yep_err_code code, size_t at) {
     return -1;
 }
 
+/* e_fail with an explicit message: the document-boundary diagnostics
+ * spell libyaml's exact words (issue #900 — the oracle's message
+ * surface, not the generic default-arm string). */
+static int e_fail_msg(yep_engine* e, yep_err_code code, size_t at, const char* msg) {
+    yep_error_set(&e->err, code, e->line, e_col(e, at) + 1, at, "%s", msg);
+    return -1;
+}
+
 /* A simple key (no explicit '?') is limited to one line and 1024
  * characters. The span runs from the node's first byte (opening
  * quote, alias star — not its anchor/tag properties) to the ':'. */
@@ -237,20 +245,29 @@ static void e_anchor_mark(yep_engine* e, uint32_t id);
 
 static int emit_now(yep_engine* e, const yep_event* ev) {
     e_anchor_mark(e, ev->anchor_id);
-    if (ev->type == YEP_EV_SCALAR) {
-        /* Resolution happens exactly here: every scalar path flows
-         * through this choke point (the resolver is the typing SSOT) */
-        if (ev->tag.len > 0) {
-            yep_tag_id tid = yep_tag_from_uri((const char*)ev->tag.p, ev->tag.len);
-            /* psych's own dumped form is the LOCAL !binary shorthand,
-             * and stdlib to_ruby accepts it beside the core URI (#168)
-             * — compat schemas resolve it to BINARY as well */
-            if (tid == YEPTRIS_TAG_CUSTOM && ev->tag.len == 7 &&
-                memcmp(ev->tag.p, "!binary", 7) == 0 && e->resolver == yep_resolver_compat11()) {
-                tid = YEPTRIS_TAG_BINARY;
-            }
-            ((yep_event*)ev)->tag_id = tid;
-        } else if (ev->implicit && e->resolver != NULL) {
+    if (ev->tag.len > 0) {
+        /* Explicit-tag resolution (the typing SSOT for SCALARS AND
+         * COLLECTIONS): an event's tag_id names the explicit tag's id,
+         * so the family walk's consistency check can tell `!!map` on a
+         * mapping, `!!seq` on a sequence and a consumer-defined custom
+         * tag (CUSTOM, no family verdict) apart — a collection event's
+         * id used to stay 0 ("str"), which made EVERY tagged collection
+         * read as `!!str` and diagnose a false mismatch (#906 slice 4's
+         * tag-driven lane needs the true id). Both routes read this
+         * field, so the DOM and event walks stay in lockstep. */
+        yep_tag_id tid = yep_tag_from_uri((const char*)ev->tag.p, ev->tag.len);
+        /* psych's own dumped form is the LOCAL !binary shorthand,
+         * and stdlib to_ruby accepts it beside the core URI (#168)
+         * — compat schemas resolve it to BINARY as well */
+        if (ev->type == YEP_EV_SCALAR && tid == YEPTRIS_TAG_CUSTOM && ev->tag.len == 7 &&
+            memcmp(ev->tag.p, "!binary", 7) == 0 && e->resolver == yep_resolver_compat11()) {
+            tid = YEPTRIS_TAG_BINARY;
+        }
+        ((yep_event*)ev)->tag_id = tid;
+    } else if (ev->type == YEP_EV_SCALAR) {
+        /* implicit typing: scalars only (a collection's id stays 0,
+         * its "no tag" value) */
+        if (ev->implicit && e->resolver != NULL) {
             ((yep_event*)ev)->tag_id = e->resolver->resolve(
                 e->resolver->ctx, (const char*)ev->value.p, (uint32_t)ev->value.len);
         } else {
@@ -468,13 +485,24 @@ static int e_open_seq(yep_engine* e, uint32_t col, uint32_t line, uint32_t coln,
         e->frames[e->depth - 1].col == col) {
         return 0;
     }
+    if (e->doc_inline) {
+        /* the marker-line law (issue #900): a block collection cannot
+         * open on the --- line. libyaml's scanner disables block
+         * entries after the document-start indicator until a line
+         * break; libyaml 0.2.5/90a56d4, Psych 5 and PyYAML (pure and
+         * C) all reject ("block sequence entries are not allowed in
+         * this context"). The suite has no seq-class pin — its
+         * 9KBC/CXX2 fail-pins cover the mapping twin in e_open_map —
+         * so the oracle's law governs here. The cursor sits at the
+         * dash, which is libyaml's problem mark. */
+        return e_fail_msg(e, YEP_ERR_DOC_BOUNDARY, e->pos,
+                          "block sequence entries are not allowed in this context");
+    }
     if (e->depth >= e->max_depth) {
         return e_fail(e, YEP_ERR_DEPTH, e->pos);
     }
     e->frames[e->depth].col = col;
     e->frames[e->depth].kind = YEP_FRAME_SEQ;
-    e->frames[e->depth].inline_doc = (uint8_t)e->doc_inline;
-    e->doc_inline = 0;
     e->depth++;
     yep_event ev;
     e_event_init(&ev, YEP_EV_SEQ_START);
@@ -506,13 +534,38 @@ static int e_open_map(yep_engine* e, uint32_t col, uint32_t line, uint32_t coln,
         e->frames[e->depth - 1].col == col) {
         return 0;
     }
+    if (e->doc_inline) {
+        /* the marker-line law (issue #900): a block mapping cannot open
+         * on the --- line. libyaml's scanner keeps simple keys disabled
+         * after the document-start indicator until a line break, so the
+         * pair separator reads as "mapping values are not allowed in
+         * this context" (the explicit-key form: "mapping keys ...");
+         * libyaml 0.2.5/90a56d4, Psych 5 and PyYAML (pure and C) all
+         * reject, and the suite pins the class INVALID (9KBC/CXX2).
+         * The mark is the pair separator itself — libyaml's problem
+         * mark ("--- a: 1" marks 1:6, the colon). */
+        size_t at = e->pos;
+        const char* msg;
+        if (at < e->len && e->p[at] == '?') {
+            msg = "mapping keys are not allowed in this context";
+        } else {
+            msg = "mapping values are not allowed in this context";
+            while (at < e->len && e->p[at] != '\n' && e->p[at] != '\r') {
+                if (e->p[at] == ':' &&
+                    (at + 1 >= e->len || e->p[at + 1] == ' ' || e->p[at + 1] == '\t' ||
+                     e->p[at + 1] == '\n' || e->p[at + 1] == '\r')) {
+                    break;
+                }
+                at++;
+            }
+        }
+        return e_fail_msg(e, YEP_ERR_DOC_BOUNDARY, at, msg);
+    }
     if (e->depth >= e->max_depth) {
         return e_fail(e, YEP_ERR_DEPTH, e->pos);
     }
     e->frames[e->depth].col = col;
     e->frames[e->depth].kind = YEP_FRAME_MAP;
-    e->frames[e->depth].inline_doc = (uint8_t)e->doc_inline;
-    e->doc_inline = 0;
     e->depth++;
     if (silent) {
         return 0;
@@ -3496,7 +3549,7 @@ static int e_node(yep_engine* e, yep_ctx ctx, uint32_t floor_col) {
     }
     if (c == '-' && (e->pos + 1 >= e->len || e->p[e->pos + 1] == ' ' || e->p[e->pos + 1] == '\t' ||
                      e->p[e->pos + 1] == '\n' || e->p[e->pos + 1] == '\r')) {
-        if (e->pos > 0 && e->p[e->pos - 1] == '\t') {
+        if (e->pos > 0 && e->p[e->pos - 1] == '\t' && !e->doc_inline) {
             return e_fail(e, YEP_ERR_UNEXPECTED, e->pos); /* "-\t-" (Y79Y) */
         }
         if (!yep_view_is_empty(anchor) || !yep_view_is_empty(tag)) {
@@ -3532,7 +3585,7 @@ static int e_node(yep_engine* e, yep_ctx ctx, uint32_t floor_col) {
              * reference (the nightly's run 38355778230). */
             return e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
         }
-        if (e->pos > 0 && e->p[e->pos - 1] == '\t') {
+        if (e->pos > 0 && e->p[e->pos - 1] == '\t' && !e->doc_inline) {
             return e_fail(e, YEP_ERR_UNEXPECTED, e->pos); /* "?\t-" (Y79Y) */
         }
         uint32_t col = e_col(e, e->pos);
@@ -3788,15 +3841,17 @@ static int e_node(yep_engine* e, yep_ctx ctx, uint32_t floor_col) {
         if (ctx == YEP_CTX_AFTER_COLON) {
             return e_fail(e, YEP_ERR_UNEXPECTED, s.end);
         }
-        if (node_at > 0 && e->p[node_at - 1] == '\t') {
+        if (node_at > 0 && e->p[node_at - 1] == '\t' && !e->doc_inline) {
+            /* (on the --- line the marker-line gate names the same
+             * refusal with libyaml's words — #900) */
             return e_fail(e, YEP_ERR_UNEXPECTED, node_at); /* ":\tkey:" */
         }
         if (e_simple_key_ok(e, s.start, s.end) != 0) {
             return -1;
         }
-        if (e->doc_inline && (!yep_view_is_empty(anchor) || !yep_view_is_empty(tag))) {
-            return e_fail(e, YEP_ERR_UNEXPECTED, e->pos); /* "--- &a k: v" */
-        }
+        /* ("--- &a k: v" rides the e_open_map gate — the marker-line
+         * law has one home now; the propped form used to fail here
+         * with the generic default-arm diagnostic.) */
         uint32_t key_col = e_col(e, node_at);
         int rc = e_open_map(e, key_col, e->line, key_col + 1, pend_a, pend_t, pend_aid, 0);
         if (rc != 0) {
@@ -4886,8 +4941,8 @@ void yep_engine_destroy(yep_engine* e) {
     }
     if (e->step != NULL) {
         yep_stepstate* st = e->step;
-        free(st->buf);
-        free(st);
+        yep_free(e->sys, st->buf);
+        yep_free(e->sys, st);
         e->step = NULL;
     }
     yep_nametab_free(&e->anchors);
@@ -5349,10 +5404,17 @@ int yep_engine_step(yep_engine* e, const char* chunk, size_t len, int final, con
         return -1;
     }
     if (e->step == NULL) {
-        e->step = calloc(1, sizeof(yep_stepstate));
+        /* the step state rides the ENGINE's allocator (#904 item 3):
+         * the raw calloc bypassed e->sys, so the fail-injection harness
+         * (test_alloc_fail's counting allocator) could never reach the
+         * streaming route's allocations — and the memory law
+         * (allocator.h: nothing outside memory/ calls malloc directly)
+         * does not stop at the engine's own struct */
+        e->step = yep_alloc(e->sys, sizeof(yep_stepstate));
         if (e->step == NULL) {
             return -1;
         }
+        memset(e->step, 0, sizeof(yep_stepstate));
     }
     yep_stepstate* st = e->step;
     st->tok_start = 1; /* the buffer starts at a line start */
@@ -5366,9 +5428,16 @@ int yep_engine_step(yep_engine* e, const char* chunk, size_t len, int final, con
             while (cap < st->len + len) {
                 cap *= 2;
             }
-            char* nb = realloc(st->buf, cap);
+            /* the pending buffer grows through e->sys too: the
+             * allocator has no realloc, so growth is alloc + copy +
+             * free (the arena.c pattern) */
+            char* nb = yep_alloc(e->sys, cap);
             if (nb == NULL) {
                 return -1;
+            }
+            if (st->buf != NULL) {
+                memcpy(nb, st->buf, st->len);
+                yep_free(e->sys, st->buf);
             }
             st->buf = nb;
             st->cap = cap;
@@ -5429,8 +5498,8 @@ int yep_engine_step(yep_engine* e, const char* chunk, size_t len, int final, con
     /* final: parse everything that remains and close the stream */
     e->line_base = st->line_base;
     int rc = engine_run_impl(e, st->buf, st->len, sink, !st->started, 1);
-    free(st->buf);
-    free(st);
+    yep_free(e->sys, st->buf);
+    yep_free(e->sys, st);
     e->step = NULL;
     e->line_base = 0;
     return rc;
@@ -5837,6 +5906,9 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
             (li.offset + li.indent + 1 >= e->len || e->p[li.offset + li.indent + 1] == ' ' ||
              e->p[li.offset + li.indent + 1] == '\t' || e->p[li.offset + li.indent + 1] == '\n' ||
              e->p[li.offset + li.indent + 1] == '\r');
+        int map_closed_on_dash = 0; /* the root map closed because this line is a
+                                     * seq entry — libyaml's parser-state name is
+                                     * "did not find expected key" */
         while (e->depth > 0) {
             const yep_frame* fr = &e->frames[e->depth - 1];
             if (fr->col > c) {
@@ -5850,11 +5922,12 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
                 int continues;
                 if (fr->kind == YEP_FRAME_SEQ) {
                     continues = dash_blank;
-                } else if (fr->inline_doc) {
-                    continues = 0; /* "--- k: v" maps take deeper keys only */
                 } else {
                     continues = yep_scan_is_key_start(li.first) || li.first == ':' ||
                                 li.first == '?' || (li.first == '-' && !dash_blank);
+                    if (!continues && dash_blank && e->depth == 1) {
+                        map_closed_on_dash = 1;
+                    }
                 }
                 if (!continues) {
                     int rc = e_close_to(e, e->depth - 1);
@@ -5868,10 +5941,19 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
         }
 
         if (e->depth == 0 && e->doc_content) {
-            /* a completed root scalar followed by more content: a second
-             * root node in the same document ("word1  # c\nword2") */
-            e_fail(e, YEP_ERR_UNEXPECTED, e->pos + li.indent);
-            goto fail;
+            /* a completed root node followed by more content: a second
+             * root in the same document ("word1  # c\nword2",
+             * "---\n[1]\n[2]"). The oracle law is libyaml's parser
+             * error — the stream wants a document marker and finds a
+             * node ("did not find expected <document start>" at the
+             * offending line's first byte; libyaml marks 2:1/3:1). A
+             * seq entry where the just-closed root map wanted a key is
+             * libyaml's "did not find expected key". Issue #900's
+             * inline-map rows never reach this arm: they die at the
+             * marker-line gate in e_open_map/e_open_seq. */
+            return e_fail_msg(e, YEP_ERR_DOC_BOUNDARY, e->pos + li.indent,
+                              map_closed_on_dash ? "did not find expected key"
+                                                 : "did not find expected <document start>");
         }
         if (e->depth > 0 && e->frames[e->depth - 1].col < c) {
             /* deeper than any open container at main dispatch: nested
@@ -5953,8 +6035,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
          * the chain below unchanged. */
         if (e->depth > 0 && e->pend_anchor.p == NULL && e->pend_tag.p == NULL &&
             e->pend_anchor_id == 0 && !e->q_key_pending && !e->q_value_pending &&
-            ((e->frames[e->depth - 1].kind == YEP_FRAME_MAP && e->frames[e->depth - 1].col == c &&
-              !e->frames[e->depth - 1].inline_doc) ||
+            ((e->frames[e->depth - 1].kind == YEP_FRAME_MAP && e->frames[e->depth - 1].col == c) ||
              (e->frames[e->depth - 1].kind == YEP_FRAME_SEQ && e->frames[e->depth - 1].col == c &&
               dash_blank))) {
             int frc = e_classified(e, e->frames[e->depth - 1].col);

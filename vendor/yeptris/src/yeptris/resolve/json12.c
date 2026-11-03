@@ -6,17 +6,23 @@
  *   bool:  true | false
  *   int:   -? ( 0 | [1-9] [0-9]* )
  *   float: -? ( 0 | [1-9] [0-9]* ) ( \. [0-9]* )? ( [eE] [-+]? [0-9]+ )?
- *   *  -> Error (the validator's business; the resolver stays str)
+ *   *  -> str (see below: example 10.8 governs; the Error row does not)
  *
  * Deliberately NOT accepted (the core schema's extensions): "True"/
  * "False"/"NULL" casings, "~"/empty nulls, +signs, 0o/0x radix, .inf/
  * .nan, underscores. The example-10.8 Invalid list pins each one.
  *
  * Shape: yep_json12_plain is the ONE classifier — the resolver wraps
- * it, and the validator re-asks it per plain scalar (no second truth
- * table anywhere). Parse never errors here: a scalar outside the
- * productions resolves str so the DOM stays family-neutral; the
- * validation face turns the spec's Error row into diagnostics.
+ * it, and the validator re-asks it per plain scalar key (no second
+ * truth table anywhere). SPEC NOTE (the 10.2.2 contradiction): the
+ * table's `* -> Error` row says no-match plains "should be considered
+ * an error", but example 10.8 — the spec's own JSON Tag Resolution
+ * demonstration — resolves no-match plains as strings BOTH as keys
+ * ("A null", "Booleans") and as values (the "Invalid" list). Example
+ * 10.8 wins: a scalar outside the productions resolves str so the DOM
+ * stays family-neutral, and the validation face does NOT turn no-match
+ * plains into diagnostics; the family's teeth are the string-key
+ * demand (12_JSON) and explicit non-JSON tags.
  */
 
 #include <stdint.h>
@@ -96,7 +102,7 @@ static yep_tag_id json12_number(void* ctx, int is_float) {
     return is_float ? 2 : 1;
 }
 
-static const yep_resolver k_json12 = {json12, json12_number, NULL};
+static const yep_resolver k_json12 = {json12, json12_number, NULL, 0};
 
 const yep_resolver* yep_resolver_json12(void) {
     return &k_json12;

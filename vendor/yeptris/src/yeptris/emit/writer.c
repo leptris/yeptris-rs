@@ -24,7 +24,6 @@
 
 #include "style.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -57,7 +56,10 @@ static void wr_maybe_flush(yep_writer* w) {
     w->len = 0;
 }
 
-static void wr_col_update(yep_writer* w, const char* p, uint32_t n) {
+/* the write primitives below are writer.h-visible: the marshal reader
+ * (marshal/to_json.c) writes through the same engine (#904 item 5's
+ * move kept ONE writer). */
+void wr_col_update(yep_writer* w, const char* p, uint32_t n) {
     for (uint32_t i = n; i > 0; i--) { /* last newline wins */
         if (p[i - 1] == '\n') {
             w->col = (int)(n - i);
@@ -67,7 +69,7 @@ static void wr_col_update(yep_writer* w, const char* p, uint32_t n) {
     w->col += (int)n;
 }
 
-static void wr_reserve(yep_writer* w, size_t need);
+void wr_reserve(yep_writer* w, size_t need);
 
 static void wr_grow(yep_writer* w, size_t need) {
     if (w->oom || w->p == NULL) {
@@ -78,6 +80,10 @@ static void wr_grow(yep_writer* w, size_t need) {
     if (want < w->cap * 2) {
         want = w->cap * 2;
     }
+    /* raw realloc ON PURPOSE (#904 item 3): w->p is either the buffer
+     * the serializers RETURN (release contract: the host's free(),
+     * emit.h) or the caller's own bytes — no document allocator may
+     * own either, or the host's free() breaks */
     char* np = (char*)realloc(w->p, want);
     if (np == NULL) {
         w->oom = 1;
@@ -87,7 +93,7 @@ static void wr_grow(yep_writer* w, size_t need) {
     w->cap = want;
 }
 
-static void wr_put(yep_writer* w, const char* p, uint32_t n) {
+void wr_put(yep_writer* w, const char* p, uint32_t n) {
     if (n > 0) {
         w->last = p[n - 1];
     }
@@ -160,7 +166,7 @@ static void wr_put(yep_writer* w, const char* p, uint32_t n) {
  * trusted-count routes keep cap bookkeeping that is not the writer's
  * to reason about (several set cap=0), so their writes stay exactly
  * the old per-call trust. */
-static void wr_reserve(yep_writer* w, size_t need) {
+void wr_reserve(yep_writer* w, size_t need) {
     /* the FLUSH runs for every route: the fixed-window streaming route
      * (grow=0) has no reservation, so this refill path is its ONLY
      * flush point -- skipping it let len ride to cap and the next
@@ -184,7 +190,7 @@ static void wr_reserve(yep_writer* w, size_t need) {
     w->reserve = w->cap - w->len - 1;
 }
 
-static void wr_byte(yep_writer* w, char c) {
+void wr_byte(yep_writer* w, char c) {
     w->last = c;
     if (c == '\n') {
         w->col = 0;
@@ -357,9 +363,91 @@ static void emit_sq(yep_writer* w, const char* p, uint32_t n) {
     wr_byte(w, '\'');
 }
 
+/* Block-side width folding (#903): libyaml's plain/single-quoted fold
+ * walk. At an INTERIOR single space (not the value's first or last
+ * byte, no adjacent spaces) with the column past best_width, the break
+ * REPLACES the space and the continuation re-indents to the fold
+ * column — parent_col + indent (libyaml's emit_scalar bumps the write
+ * indent to parent_indent + best_indent for the scalar's own lines).
+ * The folded bodies carry no breaks by construction: sc_route sends
+ * multiline content to DQ/literal, so the walk only decides on ' '
+ * (IS_SPACE — a tab is content). Columns are BYTES, matching the
+ * engine's existing 13B flow fold; libyaml counts characters, so
+ * multi-byte content folds at slightly different points (documented
+ * divergence, ASCII input folds byte-identically). */
+
+/* The fold break: libyaml's write_indent mid-scalar — indention is
+ * always clear there, so it is exactly a break plus the pad. */
+static void wr_fold_break(yep_writer* w, int fold_col) {
+    wr_byte(w, '\n');
+    wr_indent(w, fold_col);
+}
+
+/* The shared walk for a plain body (no doubling to apply). The fold
+ * decision prices the PENDING run in (it flushes only at a fold): the
+ * live column at the candidate space is w->col + run — exactly
+ * libyaml's emitter->column at the same byte. */
+static void emit_plain_folded(yep_writer* w, const char* p, uint32_t n, int fold_col) {
+    uint32_t run = 0; /* pending flush span length */
+    uint32_t i = 0;
+    while (i < n) {
+        if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + (int)run > w->best_width &&
+            p[i - 1] != ' ' && p[i + 1] != ' ') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+            }
+            wr_fold_break(w, fold_col);
+            i++; /* the fold consumes the space (libyaml: MOVE without WRITE) */
+            continue;
+        }
+        i++;
+        run++;
+    }
+    if (run) {
+        wr_put(w, p + n - run, run);
+    }
+}
+
+/* The single-quoted twin: '' doubling rides the same walk (a doubled
+ * apostrophe is two written bytes; the column tracking through wr_put
+ * prices it in automatically). */
+static void emit_sq_folded(yep_writer* w, const char* p, uint32_t n, int fold_col) {
+    wr_byte(w, '\'');
+    uint32_t run = 0;
+    uint32_t i = 0;
+    while (i < n) {
+        if (p[i] == '\'') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+            }
+            wr_put(w, "''", 2);
+            i++;
+            continue;
+        }
+        if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + (int)run > w->best_width &&
+            p[i - 1] != ' ' && p[i + 1] != ' ') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+            }
+            wr_fold_break(w, fold_col);
+            i++;
+            continue;
+        }
+        i++;
+        run++;
+    }
+    if (run) {
+        wr_put(w, p + n - run, run);
+    }
+    wr_byte(w, '\'');
+}
+
 /* JSON string escapes: \" \\ \b \f \n \r \t and \uXXXX for other
  * controls; raw UTF-8 passes through (RFC 8259). */
-static void emit_dq_json(yep_writer* w, const char* p, uint32_t n) {
+void emit_dq_json(yep_writer* w, const char* p, uint32_t n) {
     wr_byte(w, '"');
     static const char* named[32] = {
         NULL, NULL,  NULL,  NULL, NULL, NULL, NULL, NULL, "\\b", "\\t", "\\n",
@@ -397,9 +485,10 @@ static void emit_dq_json(yep_writer* w, const char* p, uint32_t n) {
     wr_byte(w, '"');
 }
 
-/* Literal block: header at the cursor, body lines at parent_col+2.
- * The explicit indicator is always '2' because the pad is defined as
- * parent_col+2 everywhere (the contract that keeps it valid). */
+/* Literal block: header at the cursor, body lines at parent_col+indent.
+ * The explicit indicator spells the pad when it is ambiguous because
+ * the pad is defined as parent_col+indent everywhere (the contract
+ * that keeps it valid; indent=2 gives the historical '2'). */
 static void emit_literal(yep_writer* w, const yep_dnode* n, int parent_col) {
     yep_view vdec = wv(w, n->value);
     const char* p = (const char*)vdec.p;
@@ -418,12 +507,14 @@ static void emit_literal(yep_writer* w, const yep_dnode* n, int parent_col) {
     /* libyaml's indicator rules (#290 family 4): the explicit indent
      * appears when the first body line starts with a space or is
      * blank — the base indent is unambiguous otherwise (the pad is
-     * parent_col+2 by contract; F6MC's leading-blank folded bodies) */
+     * parent_col+indent by contract; F6MC's leading-blank folded
+     * bodies). The digit spells the pad (#903: '2' at the default
+     * indent, the caller's level otherwise). */
     if (body > 0 && (p[0] == ' ' || p[0] == '\n')) {
-        wr_byte(w, '2');
+        wr_byte(w, (char)('0' + w->indent));
     }
     wr_byte(w, '\n');
-    int pad = parent_col + 2;
+    int pad = parent_col + w->indent;
     wr_indent(w, pad);
     for (uint32_t i = 0; i < body; i++) {
         wr_byte(w, p[i]);
@@ -521,6 +612,13 @@ enum { YEP_SC_NOTHING = 0, YEP_SC_PLAIN, YEP_SC_SQ, YEP_SC_DQ, YEP_SC_LITERAL, Y
  * The block map's explicit-key promotion consults the same predicate:
  * a key whose content demotes to DQ re-parses as a QUOTED key and must
  * ride simple, or round two's render differs (the nightly's round 118). */
+
+/* The flow arm below is a per-byte switch ON PURPOSE (#904 item 4's
+ * measured skip): the stopset SIMD kernel variant was measured at
+ * ~+3% median on flow-json emit (the only shape that enters the arm;
+ * 4-sample A/B, build-bench harness) — under the ledger's ~5% bar for
+ * touching the hot derive path, and within run noise under a loaded
+ * machine. PERF-LEDGER carries the numbers. */
 static uint8_t sc_route(yep_writer* w, const char* p, uint32_t len, int as_key, uint8_t sty_in,
                         int has_tag, int no_exotic, int plain_fact) {
     /* the parse-time fact bits (#352 lanes 2-3): a dnode verified clean
@@ -533,7 +631,9 @@ static uint8_t sc_route(yep_writer* w, const char* p, uint32_t len, int as_key, 
     if (w->in_flow && len > 0) {
         /* flow context: the indicators TERMINATE a plain scalar — a
          * raw ']' inside "{}" re-parses as a stray close (the
-         * nightly's "555555ta]" explicit-key crasher) */
+         * nightly's "555555ta]" explicit-key crasher). Per-byte switch
+         * ON PURPOSE: the stopset kernel variant measured under the
+         * skip bar (the comment above; PERF-LEDGER has the numbers). */
         for (uint32_t k = 0; k < len; k++) {
             switch (p[k]) {
             case ',':
@@ -699,10 +799,21 @@ static void emit_scalar(yep_writer* w, const yep_dnode* n, int parent_col, int a
         break; /* an empty plain value emits as nothing (libyaml's null
                   rendering, issue #290) */
     case YEP_SC_PLAIN:
-        wr_put(w, p, len);
+        if (w->block_fold && !as_key && !w->in_flow && len > 0) {
+            /* #903: block-context width folding; keys never fold
+             * (libyaml: allow_breaks = !simple_key_context) and flow
+             * members keep the flow walk */
+            emit_plain_folded(w, p, len, parent_col + w->indent);
+        } else {
+            wr_put(w, p, len);
+        }
         break;
     case YEP_SC_SQ:
-        emit_sq(w, p, len);
+        if (w->block_fold && !as_key && !w->in_flow && len > 0) {
+            emit_sq_folded(w, p, len, parent_col + w->indent);
+        } else {
+            emit_sq(w, p, len);
+        }
         break;
     case YEP_SC_LITERAL:
         emit_literal(w, n, parent_col);
@@ -1172,13 +1283,16 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
          * key, plain unpropertied scalar value, both safety-proven by
          * the exact predicates sc_route consults (no memo touch, so
          * the dry/wet sc_i streams stay aligned). Anything else falls
-         * through untouched — parity by construction. */
+         * through untouched — parity by construction. block_fold
+         * (#903) declines the arm wholesale: the fused write's
+         * arithmetic column model has no fold walk, and the general
+         * body emits the identical bytes with folding. */
         const yep_dnode* kn0 = yep_dom_node(d, child);
         const yep_dnode* vn0 = yep_dom_node(d, kn0->next_sibling);
-        if (!w->canonical && !w->json && !w->force_flow && vn0 != NULL && kn0->kind == 0 &&
-            kn0->style == 1 && kn0->anchor.len == 0 && kn0->tag.len == 0 && kn0->count == 0 &&
-            vn0->kind == 0 && vn0->style == 1 && vn0->anchor.len == 0 && vn0->tag.len == 0 &&
-            vn0->count == 0) {
+        if (!w->canonical && !w->json && !w->force_flow && !w->block_fold && vn0 != NULL &&
+            kn0->kind == 0 && kn0->style == 1 && kn0->anchor.len == 0 && kn0->tag.len == 0 &&
+            kn0->count == 0 && vn0->kind == 0 && vn0->style == 1 && vn0->anchor.len == 0 &&
+            vn0->tag.len == 0 && vn0->count == 0) {
             yep_view kv = wv(w, kn0->value);
             yep_view vv = wv(w, vn0->value);
             uint32_t f_ind = 0, f_nl = 0, f_total = 0;
@@ -1337,11 +1451,11 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
                  * with a complex key forcing the explicit form) */
                 if (!(vn->kind == 0 || vn->kind == 3 || vn->flow || vn->count == 0)) {
                     int seq_val = (vn->kind == 1 && !vn->flow);
-                    int val_col = seq_val ? content_col : content_col + 2;
+                    int val_col = seq_val ? content_col : content_col + w->indent;
                     emit_props_tail(w, vn);
                     wr_byte(w, '\n');
                     wr_indent(w, val_col);
-                    emit_node(em, kn->next_sibling, val_col - 2, 0);
+                    emit_node(em, kn->next_sibling, val_col - w->indent, 0);
                 } else {
                     emit_node(em, kn->next_sibling, content_col, 0);
                 }
@@ -1368,15 +1482,16 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
             } else {
                 /* nested block collection: next line. libyaml parity:
                  * a SEQUENCE value sits at the key's column (zero
-                 * extra indent); mappings indent +2 (issue #95) */
+                 * extra indent); mappings indent one level (issue #95;
+                 * the level width is the #903 indent option) */
                 int seq_val = (vn->kind == 1 && !vn->flow);
-                int val_col = seq_val ? content_col : content_col + 2;
+                int val_col = seq_val ? content_col : content_col + w->indent;
                 emit_props_tail(w, vn);
                 wr_byte(w, '\n');
                 wr_indent(w, val_col);
-                /* emit_block_seq dashes at parent_col+2: pass val_col-2
-                 * so the dashes land at val_col exactly */
-                emit_node(em, kn->next_sibling, val_col - 2, 0);
+                /* emit_block_seq dashes at parent_col+indent: pass
+                 * val_col-indent so the dashes land at val_col exactly */
+                emit_node(em, kn->next_sibling, val_col - w->indent, 0);
             }
         }
         pair++;
@@ -1419,11 +1534,19 @@ static void emit_block_seq(yep_emitter* em, uint32_t id, int content_col) {
             wr_byte(w, '-');
             emit_props_tail(w, cn);
             wr_byte(w, '\n');
-            wr_indent(w, content_col + 2);
+            wr_indent(w, content_col + w->indent);
             emit_node(em, child, content_col, 0);
         } else {
             /* compact: a block collection starts right after "- " */
             wr_put(w, "- ", 2);
+            if (w->indent > 2 && cn->kind != 0 && cn->kind != 3 && !cn->flow && cn->count > 0) {
+                /* libyaml/PyYAML's indent shape (#903): a nested
+                 * block collection's first line rides at the LEVEL
+                 * column (dash + indent), not the dash+2 token width
+                 * — indent=4 spells "-   a: 1" / "-   - x"; scalars,
+                 * aliases and empty/flow collections keep "- x" */
+                wr_indent(w, w->indent - 2);
+            }
             emit_node(em, child, content_col, 0);
         }
         idx++;
@@ -1459,7 +1582,10 @@ static void emit_node(yep_emitter* em, uint32_t id, int parent_col, int as_key) 
             emit_anchor_ex(em, n);
             wr_put(w, "{}", 2);
         } else {
-            emit_block_map(em, id, parent_col + 2);
+            /* the root (parent_col < 0, the caller's -2) rides column
+             * 0; every nesting level adds the indent option (#903) */
+            int base = (parent_col < 0) ? parent_col + 2 : parent_col + w->indent;
+            emit_block_map(em, id, base);
         }
         return;
     }
@@ -1469,7 +1595,8 @@ static void emit_node(yep_emitter* em, uint32_t id, int parent_col, int as_key) 
             emit_anchor_ex(em, n);
             wr_put(w, "[]", 2);
         } else {
-            emit_block_seq(em, id, parent_col + 2);
+            int base = (parent_col < 0) ? parent_col + 2 : parent_col + w->indent;
+            emit_block_seq(em, id, base);
         }
         return;
     }
@@ -1572,617 +1699,6 @@ static void emit_json_node(yep_emitter* em, uint32_t id) {
         emit_anchor_ex(em, n);
     }
     emit_canonical_scalar(w, n);
-}
-
-/* ============================================================
- * yeptris-ruby#322: the marshal READER — Ruby Marshal.dump bytes
- * to JSON text in one C call (no per-scalar crossings, no object
- * reconstruction). The format facts mirror marshal.c's emission
- * contract (empirically pinned against Ruby 3.4): w_long small form
- * x==0 -> 0x00, |x| <= 122 -> sign*(|x|+5), size form tag +-k with
- * LE payload (2^(8k) - m for negatives); strings carry 'I' ivar
- * wrappers; arrays/hashes/strings/floats register for '@' links.
- *
- * '@' links MEMMOVE the registered object's emitted span — the first
- * walk's bytes are the cache; a lookup miss is a cycle (JSON cannot
- * express it, the binding falls back). No re-parse, no registration
- * on links: the object table stays exactly Ruby's stream order.
- *
- * The JSON-irrelevant constructs ('o' objects, 'S' structs, 'u'
- * user marshal, 'l' bignums beyond i64, non-finite floats) return
- * UNSUPPORTED — the binding falls back to its per-node walk.
- * ============================================================ */
-
-typedef struct {
-    const char* p;
-    size_t len;
-    size_t at;
-} mj_stream;
-
-typedef struct {
-    const char* p;
-    uint32_t len;
-} mj_sym;
-
-typedef struct {
-    size_t pos;     /* the stream position of the type byte */
-    size_t out_off; /* where the emitted span starts in w's buffer */
-    size_t out_len; /* the span's length */
-} mj_obj;
-
-typedef struct {
-    yep_writer* w;
-    mj_stream s;
-    mj_sym* syms;
-    size_t syms_n, syms_cap;
-    mj_obj* objs;
-    size_t objs_n, objs_cap;
-    int failed; /* 0 ok, YEPTRIS_ERROR_UNSUPPORTED */
-    int compact;
-    int no_reg; /* the next mj_value entry skips registration — an
-                 * 'I'-wrapped construct registers ONCE (at the 'I');
-                 * its immediate inner must not add a second entry or
-                 * every later '@' link shifts */
-    int depth;  /* mj_value recursion guard — the reader walks hostile
-                 * bytes, not Ruby's heap: nesting is unbounded in the
-                 * input, the stack is not (the parser's own
-                 * max_depth=1000 is the same law) */
-} mj_ctx;
-
-static int mj_fail(mj_ctx* c) {
-    c->failed = YEPTRIS_ERROR_UNSUPPORTED;
-    return -1;
-}
-
-static int mj_byte(mj_ctx* c, unsigned char* out) {
-    if (c->s.at >= c->s.len)
-        return mj_fail(c);
-    *out = (unsigned char)c->s.p[c->s.at++];
-    return 0;
-}
-
-/* the w_long inverse — mirrors m_w_long's encode exactly:
- *   0x00 -> 0; 1..4 -> positive size form k=b; 5..127 -> small +(
- *   b-5); 129..250 -> small -(251-b); 251..255 -> negative size form
- *   k=256-b (payload = LE(2^(8k) - m)); 128 unreachable. */
-static int mj_long(mj_ctx* c, int64_t* out) {
-    unsigned char b;
-    if (mj_byte(c, &b) != 0)
-        return -1;
-    if (b == 0) {
-        *out = 0;
-        return 0;
-    }
-    if (b <= 4) { /* positive size form, k = b */
-        int64_t v = 0;
-        for (int i = 0; i < (int)b; i++) {
-            unsigned char d;
-            if (mj_byte(c, &d) != 0)
-                return -1;
-            v |= (int64_t)d << (8 * i);
-        }
-        *out = v;
-        return 0;
-    }
-    if (b <= 127) {
-        *out = (int64_t)b - 5;
-        return 0;
-    }
-    if (b >= 129 && b <= 250) {
-        *out = (int64_t)b - 251;
-        return 0;
-    }
-    { /* 251..255: negative size form */
-        int bytes = 256 - (int)b;
-        int64_t v = 0;
-        for (int i = 0; i < bytes; i++) {
-            unsigned char d;
-            if (mj_byte(c, &d) != 0)
-                return -1;
-            v |= (int64_t)d << (8 * i);
-        }
-        *out = v - ((int64_t)1 << (8 * bytes));
-        return 0;
-    }
-}
-
-static int mj_ivar_pairs(mj_ctx* c);
-static int mj_value(mj_ctx* c);
-static int mj_discard_value(mj_ctx* c);
-
-static int mj_string_body(mj_ctx* c, int64_t len) {
-    if (len < 0 || (uint64_t)len > (uint64_t)(c->s.len - c->s.at))
-        return mj_fail(c);
-    emit_dq_json(c->w, c->s.p + c->s.at, (uint32_t)len);
-    c->s.at += (size_t)len;
-    return 0;
-}
-
-/* a symbol: ':' + long(len) + bytes — registers in the table; the
- * name is emitted as a JSON string when emit is set */
-static int mj_symbol(mj_ctx* c, int emit) {
-    int64_t len;
-    if (mj_long(c, &len) != 0)
-        return -1;
-    if (len < 0 || (uint64_t)len > (uint64_t)(c->s.len - c->s.at))
-        return mj_fail(c);
-    const char* name = c->s.p + c->s.at;
-    uint32_t nlen = (uint32_t)len;
-    c->s.at += (size_t)len;
-    if (c->syms_n == c->syms_cap) {
-        c->syms_cap = c->syms_cap ? c->syms_cap * 2 : 16;
-        c->syms = (mj_sym*)realloc(c->syms, c->syms_cap * sizeof(*c->syms));
-        if (!c->syms)
-            return mj_fail(c);
-    }
-    c->syms[c->syms_n].p = name;
-    c->syms[c->syms_n].len = nlen;
-    c->syms_n++;
-    if (emit)
-        emit_dq_json(c->w, name, nlen);
-    return 0;
-}
-
-/* the count + (symbol, value) pairs that follow an 'I' wrapper's
- * wrapped value. Parsed and DISCARDED — encoding/freeze ivars have
- * no JSON spelling; the symbol still enters the ';' table. */
-static int mj_ivar_pairs(mj_ctx* c) {
-    int64_t count;
-    if (mj_long(c, &count) != 0)
-        return -1;
-    for (int64_t i = 0; i < count; i++) {
-        unsigned char nt;
-        if (mj_byte(c, &nt) != 0)
-            return -1;
-        if (nt == ':') {
-            if (mj_symbol(c, 0) != 0)
-                return -1; /* the name: tabled, not emitted */
-        } else if (nt == ';') {
-            int64_t sidx;
-            if (mj_long(c, &sidx) != 0)
-                return -1;
-            if (sidx < 0 || (size_t)sidx >= c->syms_n)
-                return mj_fail(c);
-        } else {
-            return mj_fail(c); /* ivar names are symbols only */
-        }
-        if (mj_discard_value(c) != 0)
-            return -1; /* the ivar value */
-    }
-    return 0;
-}
-
-/* stream-position-only walk: consumes one value, emits nothing */
-
-#define MJ_DEPTH_MAX 1000
-
-/* the discard twin rides the same budget (its 'I'/'['/'{' recursion is
- * just as hostile-byte reachable) */
-static int mj_discard_value_inner(mj_ctx* c);
-
-static int mj_discard_value(mj_ctx* c) {
-    if (c->depth >= MJ_DEPTH_MAX)
-        return mj_fail(c);
-    c->depth++;
-    int rc = mj_discard_value_inner(c);
-    c->depth--;
-    return rc;
-}
-
-static int mj_discard_value_inner(mj_ctx* c) {
-    unsigned char t;
-    int rc = mj_byte(c, &t);
-    if (rc != 0)
-        return -1;
-    switch (t) {
-    case '0':
-    case 'T':
-    case 'F':
-        return 0;
-    case 'i':
-    case ';':
-    case '@': {
-        int64_t v;
-        return mj_long(c, &v);
-    }
-    case 'l': {
-        unsigned char sign;
-        int64_t nlimbs;
-        if (mj_byte(c, &sign) != 0)
-            return -1;
-        if (sign != 0x2b && sign != 0x2d)
-            return mj_fail(c);
-        if (mj_long(c, &nlimbs) != 0)
-            return -1;
-        if (nlimbs < 0 || (uint64_t)(nlimbs * 2) > (uint64_t)(c->s.len - c->s.at))
-            return mj_fail(c);
-        c->s.at += (size_t)(nlimbs * 2);
-        return 0;
-    }
-    case 'f':
-    case '"': {
-        int64_t len;
-        if (mj_long(c, &len) != 0)
-            return -1;
-        if (len < 0 || (uint64_t)len > (uint64_t)(c->s.len - c->s.at))
-            return mj_fail(c);
-        c->s.at += (size_t)len;
-        return 0;
-    }
-    case 'I':
-        if (mj_discard_value(c) != 0)
-            return -1;
-        return mj_ivar_pairs(c);
-    case ':':
-        return mj_symbol(c, 0);
-    case '[': {
-        int64_t count;
-        if (mj_long(c, &count) != 0)
-            return -1;
-        for (int64_t i = 0; i < count; i++) {
-            if (mj_discard_value(c) != 0)
-                return -1;
-        }
-        return 0;
-    }
-    case '{': {
-        int64_t count;
-        if (mj_long(c, &count) != 0)
-            return -1;
-        for (int64_t i = 0; i < count; i++) {
-            if (mj_discard_value(c) != 0)
-                return -1; /* key */
-            if (mj_discard_value(c) != 0)
-                return -1; /* value */
-        }
-        return 0;
-    }
-    default:
-        return mj_fail(c);
-    }
-}
-
-/* the memo'd span of a registered object, copied to the cursor. The
- * span lives earlier in the same buffer (append-only), so the copy
- * is memmove-safe. */
-static int mj_emit_memo(mj_ctx* c, const mj_obj* o) {
-    if (getenv("MJ_DEBUG")) {
-        char prev[13];
-        uint32_t k = o->out_len < 12 ? (uint32_t)o->out_len : 12;
-        memcpy(prev, c->w->p + o->out_off, k);
-        prev[k] = '\0';
-        fprintf(stderr, "memo off=%zu len=%zu: %s\n", o->out_off, o->out_len, prev);
-    }
-    if (o->out_len == 0)
-        return mj_fail(c); /* not memoized yet: a cycle */
-    wr_reserve(c->w, o->out_len);
-    if (c->w->oom)
-        return -1;
-    memmove(c->w->p + c->w->len, c->w->p + o->out_off, o->out_len);
-    wr_col_update(c->w, c->w->p + c->w->len, (uint32_t)o->out_len);
-    c->w->len += o->out_len;
-    /* the raw advance bypasses wr_put: hand back the reservation it
-     * would have consumed, or the next write rides past cap */
-    c->w->reserve -= o->out_len;
-    c->w->last = c->w->p[c->w->len - 1];
-    return 0;
-}
-
-static int mj_value_inner(mj_ctx* c);
-
-/* the wrapper owns the recursion budget: hostile bytes can nest arrays
- * without bound, the stack cannot (the parser's max_depth=1000 law) */
-static int mj_value(mj_ctx* c) {
-    if (c->depth >= MJ_DEPTH_MAX)
-        return mj_fail(c);
-    c->depth++;
-    int rc = mj_value_inner(c);
-    c->depth--;
-    return rc;
-}
-
-static int mj_value_inner(mj_ctx* c) {
-    unsigned char t;
-    size_t tpos = c->s.at;
-    int reg_idx = -1;
-    size_t span_start = 0;
-    int register_this = !c->no_reg;
-    c->no_reg = 0;
-    if (mj_byte(c, &t) != 0)
-        return -1;
-    /* arrays, hashes, strings, floats, bignums and anything
-     * 'I'-wrapped register — ONCE per construct, at the outer byte
-     * (the wrapper's no_reg suppresses the inner) (0-based stream
-     * order). Bignums hold a slot but Ruby never emits a link to one
-     * (the second occurrence re-emits in full); the entry only keeps
-     * the slot count aligned for later links. Integers, symbols and
-     * the other immediates never register. */
-    if (register_this && (t == '[' || t == '{' || t == '"' || t == 'f' || t == 'I' || t == 'l')) {
-        if (c->objs_n == c->objs_cap) {
-            c->objs_cap = c->objs_cap ? c->objs_cap * 2 : 16;
-            c->objs = (mj_obj*)realloc(c->objs, c->objs_cap * sizeof(*c->objs));
-            if (!c->objs)
-                return mj_fail(c);
-        }
-        c->objs[c->objs_n].pos = tpos;
-        c->objs[c->objs_n].out_off = c->w->len;
-        c->objs[c->objs_n].out_len = 0;
-        reg_idx = (int)c->objs_n;
-        c->objs_n++;
-        span_start = c->w->len;
-    }
-    switch (t) {
-    case '0':
-        wr_put(c->w, "null", 4);
-        break;
-    case 'T':
-        wr_put(c->w, "true", 4);
-        break;
-    case 'F':
-        wr_put(c->w, "false", 5);
-        break;
-    case 'i': {
-        int64_t v;
-        if (mj_long(c, &v) != 0)
-            return -1;
-        char buf[24];
-        int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
-        wr_put(c->w, buf, (uint32_t)n);
-        break;
-    }
-    case 'l': {
-        /* the bignum: sign byte '+'/'-' + w_long(byte count) + LE
-         * bytes; the i64-representable range emits, wider falls back */
-        unsigned char sign;
-        if (mj_byte(c, &sign) != 0)
-            return -1;
-        if (sign != 0x2b && sign != 0x2d)
-            return mj_fail(c);
-        int64_t nlimbs;
-        if (mj_long(c, &nlimbs) != 0)
-            return -1;
-        if (nlimbs < 1 || nlimbs > 4)
-            return mj_fail(c); /* beyond 64 bits: fall back */
-        int64_t v = 0;
-        for (int64_t i = 0; i < nlimbs; i++) {
-            unsigned char lo, hi;
-            if (mj_byte(c, &lo) != 0 || mj_byte(c, &hi) != 0)
-                return -1;
-            /* shift in the unsigned domain: the signed form put
-             * 0xFFFF into the sign bit at limb 3 (UB, UBSan-flagged) */
-            v |= (int64_t)((uint64_t)(lo | ((uint64_t)hi << 8)) << (16 * i));
-        }
-        if (sign == 0x2d)
-            v = -v;
-        char buf[24];
-        int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
-        wr_put(c->w, buf, (uint32_t)n);
-        break;
-    }
-    case 'f': {
-        int64_t len;
-        if (mj_long(c, &len) != 0)
-            return -1;
-        if (len < 0 || (uint64_t)len > (uint64_t)(c->s.len - c->s.at))
-            return mj_fail(c);
-        char tmp[64];
-        uint32_t tl = (uint32_t)len < sizeof tmp - 1 ? (uint32_t)len : (uint32_t)sizeof tmp - 1;
-        memcpy(tmp, c->s.p + c->s.at, tl);
-        tmp[tl] = '\0';
-        c->s.at += (size_t)len;
-        double d = strtod(tmp, NULL);
-        if (!isfinite(d))
-            return mj_fail(c); /* JSON has no inf/nan spelling — and a
-                                * strtod OVERFLOW ("1e999") produces
-                                * one from text that never spells it */
-        char buf[40];
-        int wl = yep_d2s_json(d, buf);
-        wr_put(c->w, buf, (uint32_t)wl);
-        break;
-    }
-    case '"': {
-        int64_t len;
-        if (mj_long(c, &len) != 0)
-            return -1;
-        int rc = mj_string_body(c, len);
-        if (rc != 0)
-            return -1;
-        break;
-    }
-    case 'I': {
-        /* the wrapped value IS the payload: re-dispatch into it, then
-         * the ivar pairs ride. The inner dispatch must not register —
-         * the construct registered at the 'I' (the double entry
-         * shifted every later '@' link) */
-        c->no_reg = 1;
-        if (mj_value(c) != 0) {
-            c->no_reg = 0;
-            return -1;
-        }
-        c->no_reg = 0;
-        if (mj_ivar_pairs(c) != 0)
-            return -1;
-        break;
-    }
-    case ':': {
-        /* a bare symbol VALUE: emitted as its name string */
-        if (mj_symbol(c, 1) != 0)
-            return -1;
-        break;
-    }
-    case ';': {
-        int64_t idx;
-        if (mj_long(c, &idx) != 0)
-            return -1;
-        if (idx < 0 || (size_t)idx >= c->syms_n)
-            return mj_fail(c);
-        emit_dq_json(c->w, c->syms[idx].p, c->syms[idx].len);
-        break;
-    }
-    case '@': {
-        /* an object link: the registered span memmoves to the cursor */
-        int64_t idx;
-        if (mj_long(c, &idx) != 0)
-            return -1;
-        if (idx < 0 || (size_t)idx >= c->objs_n)
-            return mj_fail(c);
-        if (mj_emit_memo(c, &c->objs[idx]) != 0)
-            return -1;
-        break;
-    }
-    case '[':
-    case '{': {
-        int64_t count;
-        if (mj_long(c, &count) != 0)
-            return -1;
-        if (count < 0)
-            return mj_fail(c);
-        wr_byte(c->w, t == '[' ? '[' : '{');
-        const char* sep = c->compact ? "," : ", ";
-        uint32_t sep_len = c->compact ? 1u : 2u;
-        for (int64_t i = 0; i < count; i++) {
-            if (i > 0)
-                wr_put(c->w, sep, sep_len);
-            if (t == '[') {
-                if (mj_value(c) != 0)
-                    return -1;
-            } else {
-                /* the key: a string (with its 'I' wrapper) or a
-                 * symbol — JSON keys are strings */
-                unsigned char kt;
-                size_t ktpos = c->s.at;
-                if (mj_byte(c, &kt) != 0)
-                    return -1;
-                if (kt == 'I') {
-                    if (mj_value(c) != 0)
-                        return -1;
-                    if (mj_ivar_pairs(c) != 0)
-                        return -1;
-                } else if (kt == '"') {
-                    /* the key registers like any string object: its
-                     * span is memo'd for later '@' key links */
-                    int kreg = (int)c->objs_n;
-                    size_t kspan = c->w->len;
-                    if (kreg >= 0) {
-                        if (c->objs_n == c->objs_cap) {
-                            c->objs_cap = c->objs_cap ? c->objs_cap * 2 : 16;
-                            c->objs = (mj_obj*)realloc(c->objs, c->objs_cap * sizeof(*c->objs));
-                            if (!c->objs)
-                                return mj_fail(c);
-                        }
-                        c->objs[c->objs_n].pos = ktpos;
-                        c->objs[c->objs_n].out_off = c->w->len;
-                        c->objs[c->objs_n].out_len = 0;
-                        c->objs_n++;
-                    }
-                    int64_t len;
-                    if (mj_long(c, &len) != 0)
-                        return -1;
-                    int rc = mj_string_body(c, len);
-                    if (rc != 0)
-                        return -1;
-                    if (kreg >= 0) {
-                        c->objs[kreg].out_off = kspan;
-                        c->objs[kreg].out_len = c->w->len - kspan;
-                    }
-                } else if (kt == ':') {
-                    if (mj_symbol(c, 1) != 0)
-                        return -1;
-                } else if (kt == ';') {
-                    int64_t idx;
-                    if (mj_long(c, &idx) != 0)
-                        return -1;
-                    if (idx < 0 || (size_t)idx >= c->syms_n)
-                        return mj_fail(c);
-                    emit_dq_json(c->w, c->syms[idx].p, c->syms[idx].len);
-                } else if (kt == '@') {
-                    int64_t idx;
-                    if (mj_long(c, &idx) != 0)
-                        return -1;
-                    if (idx < 0 || (size_t)idx >= c->objs_n)
-                        return mj_fail(c);
-                    if (mj_emit_memo(c, &c->objs[idx]) != 0)
-                        return -1;
-                } else {
-                    return mj_fail(c);
-                }
-                wr_put(c->w, c->compact ? ":" : ": ", c->compact ? 1u : 2u);
-                if (mj_value(c) != 0)
-                    return -1;
-            }
-        }
-        wr_byte(c->w, t == '[' ? ']' : '}');
-        break;
-    }
-    default:
-        return mj_fail(c);
-    }
-    if (reg_idx >= 0) {
-        c->objs[reg_idx].out_off = span_start;
-        c->objs[reg_idx].out_len = c->w->len - span_start;
-    }
-    return 0;
-}
-
-YEPTRIS_API YeptrisStatus yeptris_json_from_marshal(const char* m, size_t m_len, int compact,
-                                                    char** out, size_t* out_len) {
-    if (out == NULL || out_len == NULL)
-        return YEPTRIS_ERROR_ARG;
-    *out = NULL;
-    *out_len = 0;
-    if (m == NULL || m_len < 2 || (unsigned char)m[0] != 0x04 || (unsigned char)m[1] != 0x08)
-        return YEPTRIS_ERROR_UNSUPPORTED;
-    yep_emitter em;
-    memset(&em, 0, sizeof(em));
-    yep_writer* w = &em.w;
-    w->sc_dec = NULL;
-    w->sc_i = 0;
-    w->json = 1;
-    w->json_compact = compact ? 1 : 0;
-    w->json_pretty = 0;
-    w->canonical = 0;
-    w->explicit_doc_start = 0;
-    w->best_width = 0;
-    w->sv_input = NULL;
-    w->sv_arena = NULL;
-    w->sink = NULL;
-    w->force_flow = 0;
-    w->in_flow = 0;
-    w->flow_item = 0;
-    w->unserializable = 0;
-
-    mj_ctx c;
-    memset(&c, 0, sizeof(c));
-    c.w = w;
-    c.s.p = m;
-    c.s.len = m_len;
-    c.s.at = 2; /* the 4.8 header */
-    c.compact = compact ? 1 : 0;
-
-    /* one wet pass into a growable buffer (the #352 slice-2 shape) */
-    size_t est = m_len * 2 + 64;
-    char* buf = (char*)malloc(est);
-    if (!buf)
-        return YEPTRIS_ERROR_MEMORY;
-    w->p = buf;
-    w->cap = est;
-    w->grow = 1;
-
-    mj_value(&c);
-
-    int failed = c.failed;
-    size_t wrote = w->len;
-    buf = w->p;
-    free(c.syms);
-    free(c.objs);
-    if (failed || w->oom) {
-        free(buf);
-        return failed ? (YeptrisStatus)failed : YEPTRIS_ERROR_MEMORY;
-    }
-    buf[wrote] = '\0';
-    *out = buf;
-    *out_len = wrote;
-    return YEPTRIS_OK;
 }
 
 size_t yep_emit_run(yep_emitter* em, int dry) {

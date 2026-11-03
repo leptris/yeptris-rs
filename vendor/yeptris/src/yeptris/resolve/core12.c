@@ -11,6 +11,10 @@
  * and signs take the number walk. The old chain tried the word memcmps
  * for every length-4/5 scalar before ruling (anchor-heavy: 42 cycles
  * per call on gate-passing strings).
+ *
+ * yep_core12_plain is the ONE classifier (the yep_json12_plain
+ * precedent): the resolver wraps it, and the full-1.2 family composes
+ * it (full12.c's timestamp lane rides the same truth table).
  */
 
 #include <stdint.h>
@@ -18,8 +22,7 @@
 
 #include "resolver.h"
 
-static yep_tag_id core12(void* ctx, const char* p, uint32_t n) {
-    (void)ctx;
+yep_tag_id yep_core12_plain(const char* p, uint32_t n) {
     if (n == 0) {
         return 4; /* null */
     }
@@ -133,12 +136,17 @@ static yep_tag_id core12(void* ctx, const char* p, uint32_t n) {
     return 0;
 }
 
+static yep_tag_id core12(void* ctx, const char* p, uint32_t n) {
+    (void)ctx;
+    return yep_core12_plain(p, n);
+}
+
 static yep_tag_id core12_number(void* ctx, int is_float) {
     (void)ctx;
     return is_float ? 2 : 1;
 }
 
-static const yep_resolver k_core12 = {core12, core12_number, NULL};
+static const yep_resolver k_core12 = {core12, core12_number, NULL, 0};
 
 const yep_resolver* yep_resolver_core12(void) {
     return &k_core12;

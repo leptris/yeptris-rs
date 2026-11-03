@@ -38,7 +38,12 @@ typedef struct yep_writer {
     const char* json_indent;                    /* json_pretty indent unit; NULL = 2 spaces */
     int json_indent_len;                        /* json_pretty unit byte length */
     int best_width;                             /* 13B: 0 = default 80; flow lines wrap after a
-                                                 * value past this width */
+                                                 * value past this width; with block_fold it is
+                                                 * also the block scalar fold column (#903) */
+    int indent;                                 /* #903: block indent per level (2..9, default
+                                                 * 2): nested map content and seq item columns */
+    int block_fold;                             /* #903: plain/quoted block scalars fold at
+                                                 * best_width (libyaml's plain-fold walk) */
     int col;                                    /* current output column (wr_* maintains) */
     const char* sv_input;                       /* compact-view decode bases (dom regions) */
     const char* sv_arena;
@@ -81,6 +86,15 @@ typedef struct yep_emitter {
 
 /* One pass over the document set. dry=1 counts exactly. */
 size_t yep_emit_run(yep_emitter* em, int dry);
+
+/* The write primitives, shared with the marshal reader
+ * (marshal/to_json.c — the move keeps ONE writer engine; #904 item 5).
+ * Internal: never in a public header. */
+void wr_col_update(yep_writer* w, const char* p, uint32_t n);
+void wr_reserve(yep_writer* w, size_t need);
+void wr_put(yep_writer* w, const char* p, uint32_t n);
+void wr_byte(yep_writer* w, char c);
+void emit_dq_json(yep_writer* w, const char* p, uint32_t n);
 
 /* Compact single-line JSON (internal entries for the json-c compat
  * layer's to_json_string forms). pretty selects json-c's

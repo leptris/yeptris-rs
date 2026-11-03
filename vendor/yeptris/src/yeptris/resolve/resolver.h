@@ -25,6 +25,12 @@ typedef struct yep_resolver {
      * skips the digit re-walk resolve() would pay. NULL = resolve(). */
     yep_tag_id (*resolve_number)(void* ctx, int is_float);
     void* ctx;
+    /* 1 when timestamp:yaml.org,2002 is IN the family's implicit set —
+     * the validator family-checks explicit !!timestamp content through
+     * resolve() (#906 slice 3). Core leaves it consumer-defined (the
+     * core schema has no timestamp, spec 10.3); 11_COMPAT is not a
+     * validation family; json12 rejects the tag wholesale. */
+    int timestamped;
 } yep_resolver;
 
 /* Typing for a validated number span, through whichever hook the
@@ -39,6 +45,9 @@ static inline yep_tag_id yep_resolve_number(const yep_resolver* r, int is_float)
 /* The two built-in resolvers (no ctx). */
 const yep_resolver* yep_resolver_core12(void);
 const yep_resolver* yep_resolver_compat11(void);
+/* The core schema's plain-scalar classifier (the core truth table):
+ * the resolver wraps it and the full family composes it. */
+yep_tag_id yep_core12_plain(const char* p, uint32_t n);
 
 /* The spec 10.2 JSON schema resolver (#882): null/true/false exact,
  * the JSON int and float productions, everything else str. Parse stays
@@ -48,6 +57,17 @@ const yep_resolver* yep_resolver_json12(void);
 /* 1 when the plain span matches a JSON-schema production. The one
  * truth table for the 12_JSON family (validate/ re-asks it). */
 int yep_json12_plain(const char* p, uint32_t n);
+
+/* The FULL 1.2 family resolver (#906 slice 3): the core productions
+ * verbatim (spec 10.4: interoperable schemas are "strongly recommended
+ * ... based on the core schema") extended with the yaml.org type
+ * repository's carried-forward set — RFC3339-era timestamps on untagged
+ * plains (spec 2.22's canonical/iso8601/spaced/date forms; PyYAML's
+ * timestamp regex as the practice oracle) and the merge/value words.
+ * The 1.1 NUMERIC quirks (underscores, sexagesimal, leading-0 octal,
+ * y/n booleans) stay in compat11 — full is spec-refereed, not
+ * psych-refereed. */
+const yep_resolver* yep_resolver_full12(void);
 
 /* core tag id <-> canonical URI (tags.c is the identity SSOT). */
 const char* yep_tag_uri(yep_tag_id id);

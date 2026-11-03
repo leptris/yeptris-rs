@@ -11,6 +11,9 @@
 #include "dom/dom.h"
 #include "memory/allocator.h"
 
+#include <yeptris/error.h>
+#include <yeptris/resolve.h> /* YeptrisSchema */
+
 typedef struct yeptris_document {
     yep_dom* dom;
     const yep_allocator* sys;
@@ -59,8 +62,25 @@ extern "C" {
 yep_dom* yep_doc_dom(yeptris_document* doc);
 yeptris_node* yep_handle_new(yeptris_document* doc, uint32_t id);
 
+/* parse.c's sink-entry seam (#902): the DOM route's exact front-end and
+ * engine run into a caller sink — no DOM, no tape. Statuses are the
+ * parse route's (OK, or PARSE / DEPTH / ENCODING / MEMORY; the sink's
+ * own failure rides MEMORY like the DOM builder's). on_input (may be
+ * NULL) receives the run's input view — the DOM route's input_base law
+ * (the transcoded copy, or the caller's bytes) and its post-BOM length
+ * — immediately before the engine runs, because the events' borrowed
+ * views subtract from it. The bytes live only for the run. */
+typedef void (*yep_input_fn)(void* ctx, const char* base, size_t len);
+YeptrisStatus yep_parse_events(const char* buf, size_t len, YeptrisSchema schema,
+                               const yep_sink* sink, yep_input_fn on_input, void* on_ctx);
+
 #ifdef __cplusplus
 }
 #endif
+
+/* The typing SSOT's one switch (parse.c owns it; the stream iterator
+ * and any future bytes->document route select through it too). */
+struct yep_resolver; /* resolve/resolver.h's fwd — doc.h stays leaf */
+const struct yep_resolver* resolver_for_schema(YeptrisSchema schema);
 
 #endif /* YEP_DOC_H */

@@ -14,6 +14,10 @@
 typedef struct {
     yeptris_event_fn fn;
     void* ctx;
+    uint32_t abort_line; /* the mark of the event the callback aborted
+                          * on: the abort-text law sets the channel AT
+                          * the abort point, not at 0/0 */
+    uint32_t abort_col;
 } yep_push_ctx;
 
 static int push_on_event(void* ctx, const yep_event* ev) {
@@ -73,7 +77,14 @@ static int push_on_event(void* ctx, const yep_event* ev) {
     e.anchor_len = ev->anchor.len;
     e.tag = ev->tag.len > 0 ? (const char*)ev->tag.p : NULL;
     e.tag_len = ev->tag.len;
-    return p->fn(p->ctx, &e);
+    int rc = p->fn(p->ctx, &e);
+    if (rc != 0) {
+        /* the abort point travels with the abort: the TLS slot's mark
+         * is where the walk stopped, not 0/0 (events.h's contract) */
+        p->abort_line = ev->line;
+        p->abort_col = ev->col;
+    }
+    return rc;
 }
 
 YEPTRIS_API YeptrisStatus yeptris_push_parse(const char* buf, size_t len, yeptris_event_fn on_event,
@@ -84,11 +95,17 @@ YEPTRIS_API YeptrisStatus yeptris_push_parse(const char* buf, size_t len, yeptri
     if (on_event == NULL) {
         return YEPTRIS_ERROR_ARG;
     }
+    /* the push run owns the channel for its duration: clearing at
+     * entry makes the abort-text law verifiable (the message a caller
+     * reads after a push is THIS run's verdict, never a stale one
+     * from an earlier operation on the thread — error.h promises ""
+     * after a success) */
+    yep_error_clear(yep_error_tls());
     yep_engine* eng = yep_engine_create(yep_system_allocator());
     if (eng == NULL) {
         return YEPTRIS_ERROR_MEMORY;
     }
-    yep_push_ctx p = {on_event, ctx};
+    yep_push_ctx p = {on_event, ctx, 0, 0};
     yep_sink sink = {.on_event = push_on_event,
                      .ctx = &p,
                      .on_flow_build = NULL,
@@ -118,9 +135,17 @@ YEPTRIS_API YeptrisStatus yeptris_push_parse(const char* buf, size_t len, yeptri
     }
     /* the engine's own memory failures report MEMORY (the parse route's
      * law); the callback abort keeps its documented contract — a parse
-     * stop, clean channel */
+     * stop with the last-error channel SET (#904 item 4, the
+     * abort-text law: the old code returned PARSE over a CLEAN slot,
+     * so yeptris_last_error served whatever stale message this thread's
+     * previous operation had left there). YEP_ERR_ABORTED carries the
+     * mark of the event the callback aborted on. */
     if (err_code == YEP_ERR_MEMORY) {
         return YEPTRIS_ERROR_MEMORY;
+    }
+    if (err_code == YEP_ERR_NONE) {
+        yep_error_set(yep_error_tls(), YEP_ERR_ABORTED, p.abort_line, p.abort_col, 0,
+                      "parse aborted by the event callback at %u:%u", p.abort_line, p.abort_col);
     }
     return YEPTRIS_ERROR_PARSE;
 }

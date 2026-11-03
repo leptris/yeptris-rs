@@ -52,7 +52,11 @@ typedef struct {
     uint8_t tag_id; /* the resolver's verdict for this scalar */
     uint8_t is_key; /* the entry lands in the inner map's key slot */
     uint8_t b;      /* BOOL payload; implicit-plain flag otherwise */
-    uint32_t off;   /* STR/TIMESTAMP/ALIAS/anchor bytes */
+    uint32_t off;   /* STR/TIMESTAMP/ALIAS/anchor bytes; SEQ/MAP OPEN:
+                     * the collection's EXPLICIT tag text ("tag:yaml.
+                     * org,2002:set") when it carries one — off/len stay
+                     * 0 for untagged containers, so hosts re-tag
+                     * containers without a second drain */
     uint32_t len;
     uint64_t p; /* INT or FLOAT payload, by kind */
 } YeptrisValue;
@@ -80,7 +84,9 @@ typedef struct {
     size_t count;
     size_t arena_len;
     int64_t* payloads; /* INT or FLOAT bits, by kind */
-    uint32_t* offs;    /* STR/TIMESTAMP/ALIAS/ANCHOR bytes */
+    uint32_t* offs;    /* STR/TIMESTAMP/ALIAS/ANCHOR bytes; SEQ/MAP OPEN:
+                          the explicit tag text when tagged (see
+                          YeptrisValue.off) */
     uint32_t* lens;
     uint8_t* kinds; /* YeptrisValueKind */
     uint8_t* tags;  /* resolver verdict per scalar */

@@ -29,6 +29,7 @@ set(YEPTRIS_SOURCES
     yeptris/dom/mapindex.c
     yeptris/dom/mutate.c
     yeptris/parse.c
+    yeptris/parse/stream_iter.c
     yeptris/build.c
     yeptris/events/capture.c
     yeptris/events/push.c
@@ -40,17 +41,23 @@ set(YEPTRIS_SOURCES
     yeptris/resolve/core12.c
     yeptris/resolve/compat11.c
     yeptris/resolve/json12.c
+    yeptris/resolve/full12.c
     yeptris/parse/numbers.c
     yeptris/events/values.c
     yeptris/schema.c
     yeptris/validate/regexp.c
     yeptris/validate/validate.c
     yeptris/validate/compile.c
+    yeptris/validate/resources.c
     yeptris/validate/jsonschema.c
+    yeptris/validate/registry.c
+    yeptris/validate/output.c
+    yeptris/validate/stream.c
     yeptris/tape.c
     yeptris/plan.c
 
     yeptris/marshal.c
+    yeptris/marshal/to_json.c
     yeptris/visit/json_visit.c
     yeptris/visit/yaml_visit.c
     yeptris/visit/dom_visit.c

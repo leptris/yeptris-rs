@@ -11,12 +11,22 @@
 #include "../doc.h"
 #include "writer.h"
 
+/* Every field reads behind ITS OWN offsetof gate — never the whole
+ * struct's sizeof. The #909/#903 append grew sizeof(*opts) to 24, and
+ * a `size >= sizeof(*opts)` gate silently orphaned the ORIGINAL
+ * fields for callers compiled against the 16-byte struct (the Ruby
+ * binding): best_width fell back to 80 and canonical fell off. The
+ * versioning contract is per field: declared-present or default. */
 static int opts_canonical(const yeptris_emit_options* opts) {
-    return opts != NULL && opts->size >= sizeof(*opts) && opts->canonical;
+    return opts != NULL &&
+           opts->size >= (uint32_t)(offsetof(yeptris_emit_options, canonical) + sizeof(int)) &&
+           opts->canonical;
 }
 
 static int opts_width(const yeptris_emit_options* opts) {
-    if (opts == NULL || opts->size < sizeof(*opts) || opts->best_width <= 0) {
+    if (opts == NULL ||
+        opts->size < (uint32_t)(offsetof(yeptris_emit_options, best_width) + sizeof(int)) ||
+        opts->best_width <= 0) {
         return 80; /* libyaml best_width parity */
     }
     return opts->best_width;
@@ -30,6 +40,41 @@ static int opts_doc_marker(const yeptris_emit_options* opts) {
         return 0;
     }
     return opts->explicit_doc_start != 0;
+}
+
+static int opts_indent(const yeptris_emit_options* opts) {
+    /* size-versioned (#903); out of range rides the default (libyaml
+     * clamps 2..9 the same way) */
+    int ind = 2;
+    if (opts != NULL &&
+        opts->size >= (uint32_t)(offsetof(yeptris_emit_options, best_indent) + sizeof(int))) {
+        ind = opts->best_indent;
+    }
+    if (ind < 2 || ind > 9) {
+        ind = 2;
+    }
+    return ind;
+}
+
+static int opts_block_fold(const yeptris_emit_options* opts) {
+    /* size-versioned (#903): default off — block output stays
+     * width-invariant (byte-identical with the pre-option releases) */
+    if (opts == NULL ||
+        opts->size < (uint32_t)(offsetof(yeptris_emit_options, block_fold) + sizeof(int))) {
+        return 0;
+    }
+    return opts->block_fold != 0;
+}
+
+/* The emitter's SCRATCH rides the document's allocator (#904 item 3):
+ * sc_dec and the streaming window are emitter-internal (never leak
+ * into caller hands), so the fail-injection harness — a counting
+ * allocator passed at the document's build — now reaches them. The
+ * CALLER-RETURNED output buffers stay system-malloc on purpose: their
+ * release contract is free() (emit.h "malloc'd buffer, caller frees"),
+ * and a failing allocator's pointer cannot be freed by the host. */
+static const yep_allocator* emit_sys(const yeptris_document* doc) {
+    return doc->sys != NULL ? doc->sys : yep_system_allocator();
 }
 
 YEPTRIS_API size_t yeptris_serialize_into_ex(YeptrisDocument handle,
@@ -62,6 +107,8 @@ YEPTRIS_API size_t yeptris_serialize_into_ex(YeptrisDocument handle,
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = opts_width(opts);
+    em.w.indent = opts_indent(opts);
+    em.w.block_fold = opts_block_fold(opts);
     em.w.col = 0;
     em.w.sv_input = handle ? ((const yeptris_document*)handle)->dom->input_base : NULL;
     em.w.sv_arena = handle ? ((const yeptris_document*)handle)->dom->str : NULL;
@@ -70,10 +117,11 @@ YEPTRIS_API size_t yeptris_serialize_into_ex(YeptrisDocument handle,
     em.w.sink_aborted = 0;
     em.w.flushed = 0;
     memset(&em.canon_names, 0, sizeof(em.canon_names));
-    if (em.w.canonical && !yep_nametab_init(&em.canon_names, yep_system_allocator())) {
+    if (em.w.canonical && !yep_nametab_init(&em.canon_names, emit_sys(em.doc))) {
         return 0;
     }
-    em.w.sc_dec = (uint8_t*)malloc(em.doc->dom->ncount > 0 ? em.doc->dom->ncount : 1);
+    em.w.sc_dec =
+        (uint8_t*)yep_alloc(emit_sys(em.doc), em.doc->dom->ncount > 0 ? em.doc->dom->ncount : 1);
     if (em.w.sc_dec == NULL) {
         if (em.canon_names.sys != NULL) {
             yep_nametab_free(&em.canon_names);
@@ -82,7 +130,7 @@ YEPTRIS_API size_t yeptris_serialize_into_ex(YeptrisDocument handle,
     }
     size_t need = yep_emit_run(&em, 1);
     if (buf == NULL || cap < need + 1) {
-        free(em.w.sc_dec);
+        yep_free(emit_sys(em.doc), em.w.sc_dec);
         if (em.canon_names.sys != NULL) {
             yep_nametab_free(&em.canon_names);
         }
@@ -90,7 +138,7 @@ YEPTRIS_API size_t yeptris_serialize_into_ex(YeptrisDocument handle,
     }
     em.w.p = buf;
     size_t wrote = yep_emit_run(&em, 0);
-    free(em.w.sc_dec);
+    yep_free(emit_sys(em.doc), em.w.sc_dec);
     if (em.canon_names.sys != NULL) {
         yep_nametab_free(&em.canon_names);
     }
@@ -128,6 +176,8 @@ YEPTRIS_API size_t yeptris_serialize_into_trusted(YeptrisDocument handle,
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = opts_width(opts);
+    em.w.indent = opts_indent(opts);
+    em.w.block_fold = opts_block_fold(opts);
     em.w.col = 0;
     em.w.sv_input = ((const yeptris_document*)handle)->dom->input_base;
     em.w.sv_arena = ((const yeptris_document*)handle)->dom->str;
@@ -136,7 +186,7 @@ YEPTRIS_API size_t yeptris_serialize_into_trusted(YeptrisDocument handle,
     em.w.sink_aborted = 0;
     em.w.flushed = 0;
     memset(&em.canon_names, 0, sizeof(em.canon_names));
-    if (em.w.canonical && !yep_nametab_init(&em.canon_names, yep_system_allocator())) {
+    if (em.w.canonical && !yep_nametab_init(&em.canon_names, emit_sys(em.doc))) {
         return 0;
     }
     /* #352: ONE bounded wet pass — no memo, no dry run (the emit-split
@@ -194,6 +244,8 @@ YEPTRIS_API char* yeptris_serialize_ex(YeptrisDocument handle, const yeptris_emi
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = opts_width(opts);
+    em.w.indent = opts_indent(opts);
+    em.w.block_fold = opts_block_fold(opts);
     em.w.col = 0;
     em.w.sv_input = handle ? ((const yeptris_document*)handle)->dom->input_base : NULL;
     em.w.sv_arena = handle ? ((const yeptris_document*)handle)->dom->str : NULL;
@@ -202,7 +254,7 @@ YEPTRIS_API char* yeptris_serialize_ex(YeptrisDocument handle, const yeptris_emi
     em.w.sink_aborted = 0;
     em.w.flushed = 0;
     memset(&em.canon_names, 0, sizeof(em.canon_names));
-    if (em.w.canonical && !yep_nametab_init(&em.canon_names, yep_system_allocator())) {
+    if (em.w.canonical && !yep_nametab_init(&em.canon_names, emit_sys(em.doc))) {
         return NULL;
     }
     /* #352 slice 2: ONE wet pass into a growable buffer — the dry
@@ -211,6 +263,9 @@ YEPTRIS_API char* yeptris_serialize_ex(YeptrisDocument handle, const yeptris_emi
      * starts at the input size (+64) and doubles on demand; a final
      * shrink-to-fit keeps the returned allocation tight. No dry pass,
      * so no decisions table. */
+    /* raw malloc ON PURPOSE (#904 item 3): this buffer is RETURNED —
+     * the release contract is the host's free() (emit.h), so it must
+     * come from the system allocator, not the document's */
     size_t est = em.doc->dom->input_len + 64;
     if (est < 256) {
         est = 256;
@@ -260,6 +315,8 @@ YEPTRIS_API char* yeptris_serialize_ex(YeptrisDocument handle, const yeptris_emi
  * (+64) and doubles on demand; shrink-to-fit at the end. Owns the
  * emitter's canon_names cleanup. */
 static char* yep_json_run_growable(yep_emitter* em, size_t* len) {
+    /* raw malloc ON PURPOSE (#904 item 3): the buffer is RETURNED —
+     * the host's free() owns it (emit.h), system allocator only */
     size_t est = em->doc->dom->input_len + 64;
     if (est < 256) {
         est = 256;
@@ -328,6 +385,8 @@ YEPTRIS_API char* yeptris_serialize_json(YeptrisDocument handle, size_t* len) {
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = 0; /* JSON: no folding (single-line output) */
+    em.w.indent = 2;
+    em.w.block_fold = 0;
     em.w.col = 0;
     em.w.sv_input = handle ? ((const yeptris_document*)handle)->dom->input_base : NULL;
     em.w.sv_arena = handle ? ((const yeptris_document*)handle)->dom->str : NULL;
@@ -370,6 +429,8 @@ YEPTRIS_API char* yeptris_serialize_json_ex(YeptrisDocument handle, size_t* len,
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = 0; /* JSON: no folding (single-line output) */
+    em.w.indent = 2;
+    em.w.block_fold = 0;
     em.w.col = 0;
     em.w.sv_input = handle ? ((const yeptris_document*)handle)->dom->input_base : NULL;
     em.w.sv_arena = handle ? ((const yeptris_document*)handle)->dom->str : NULL;
@@ -414,6 +475,8 @@ char* yep_serialize_json_compact(const yeptris_document* doc, size_t* len) {
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = 0;
+    em.w.indent = 2;
+    em.w.block_fold = 0;
     em.w.col = 0;
     em.w.sv_input = doc->dom->input_base;
     em.w.sv_arena = doc->dom->str;
@@ -460,6 +523,8 @@ char* yep_serialize_json_pretty_ex(const yeptris_document* doc, size_t* len, con
     em.w.json_indent = indent;
     em.w.json_indent_len = indent == NULL ? 2 : (int)indent_len;
     em.w.best_width = 0;
+    em.w.indent = 2;
+    em.w.block_fold = 0;
     em.w.col = 0;
     em.w.sv_input = doc->dom->input_base;
     em.w.sv_arena = doc->dom->str;
@@ -468,9 +533,11 @@ char* yep_serialize_json_pretty_ex(const yeptris_document* doc, size_t* len, con
     em.w.sink_aborted = 0;
     em.w.flushed = 0;
     memset(&em.canon_names, 0, sizeof(em.canon_names));
-    if (em.w.canonical && !yep_nametab_init(&em.canon_names, yep_system_allocator())) {
+    if (em.w.canonical && !yep_nametab_init(&em.canon_names, emit_sys(doc))) {
         return NULL;
     }
+    /* raw malloc ON PURPOSE (#904 item 3): the dry-wet pair's exact-
+     * sized output is RETURNED — the host's free() owns it */
     size_t need = yep_emit_run(&em, 1);
     char* out = malloc(need + 1);
     if (out == NULL) {
@@ -532,6 +599,8 @@ YEPTRIS_API size_t yeptris_serialize_stream(YeptrisDocument handle,
     em.w.json_pretty = 0;
     em.w.pretty_depth = 0;
     em.w.best_width = opts_width(opts);
+    em.w.indent = opts_indent(opts);
+    em.w.block_fold = opts_block_fold(opts);
     em.w.col = 0;
     em.w.sv_input = handle ? ((const yeptris_document*)handle)->dom->input_base : NULL;
     em.w.sv_arena = handle ? ((const yeptris_document*)handle)->dom->str : NULL;
@@ -539,11 +608,14 @@ YEPTRIS_API size_t yeptris_serialize_stream(YeptrisDocument handle,
     em.w.sink_ctx = ctx;
     em.w.watermark = YEP_EMIT_WATERMARK;
     memset(&em.canon_names, 0, sizeof(em.canon_names));
-    if (em.w.canonical && !yep_nametab_init(&em.canon_names, yep_system_allocator())) {
+    if (em.w.canonical && !yep_nametab_init(&em.canon_names, emit_sys(em.doc))) {
         return 0;
     }
-    /* one scratch window; the writer flushes it when it fills */
-    char* window = malloc(YEP_EMIT_WATERMARK * 2);
+    /* one scratch window; the writer flushes it when it fills.
+     * Document allocator (#904 item 3): emitter-internal scratch —
+     * flushed out through the sink, never returned — so the
+     * fail-injection harness reaches it. */
+    char* window = yep_alloc(emit_sys(em.doc), YEP_EMIT_WATERMARK * 2);
     if (window == NULL) {
         if (em.canon_names.sys != NULL) {
             yep_nametab_free(&em.canon_names);
@@ -564,7 +636,7 @@ YEPTRIS_API size_t yeptris_serialize_stream(YeptrisDocument handle,
             /* total already counted by the flush hooks */
         }
     }
-    free(window);
+    yep_free(emit_sys(em.doc), window);
     if (em.canon_names.sys != NULL) {
         yep_nametab_free(&em.canon_names);
     }

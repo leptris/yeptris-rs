@@ -50,11 +50,6 @@ typedef struct {
     uint8_t is_map;
 } yep_cframe;
 
-#define YEP_CBOR_TAGBUF                                                                            \
-    512 /* a semantic-tag chain over ~23 links is                                                  \
-         * pathological; the arena form had no cap,                                                \
-         * the stack form does (documented) */
-
 typedef struct {
     yep_dom* d; /* the DOM sink's ctx (NULL for pure sinks) */
     const unsigned char* p;
@@ -66,6 +61,7 @@ typedef struct {
      * first — the next item's writer consumes it) */
     char tagbuf[YEP_CBOR_TAGBUF];
     uint32_t taglen;
+    uint32_t taglinks; /* the chain's link count (the shared cap) */
     /* indefinite-string accumulation (chunk framing is the grammar's;
      * the finished span goes to one str/bytes callback) */
     unsigned char* ibuf;
@@ -190,6 +186,7 @@ static const char* cbor_take_tag(yep_cdec* c, uint32_t* len) {
     }
     *len = c->taglen;
     c->taglen = 0;
+    c->taglinks = 0;
     return c->tagbuf;
 }
 
@@ -239,9 +236,9 @@ static int cbor_open(yep_cdec* c, int is_map, uint64_t cap) {
 }
 
 static int cbor_note_tag(yep_cdec* c, uint64_t tag) {
-    if (c->taglen + 1 + 20 > sizeof c->tagbuf) {
+    if (c->taglinks >= YEP_CBOR_TAG_MAX_LINKS || c->taglen + 1 + 20 > sizeof c->tagbuf) {
         yep_error_set(yep_error_tls(), YEP_ERR_UNEXPECTED, 0, 0, c->i,
-                      "semantic-tag chain exceeds %u bytes at byte %zu", (unsigned)sizeof c->tagbuf,
+                      "semantic-tag chain exceeds %u links at byte %zu", YEP_CBOR_TAG_MAX_LINKS,
                       c->i);
         c->status = YEPTRIS_ERROR_PARSE;
         return 0;
@@ -250,6 +247,7 @@ static int cbor_note_tag(yep_cdec* c, uint64_t tag) {
         c->tagbuf[c->taglen++] = ' '; /* separator between chain links */
     }
     c->taglen += cbor_u64dec(tag, c->tagbuf + c->taglen);
+    c->taglinks++;
     return 1;
 }
 
