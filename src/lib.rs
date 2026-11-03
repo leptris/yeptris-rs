@@ -178,6 +178,18 @@ pub fn version() -> &'static str {
     }
 }
 
+/// The engine revision the vendored snapshot was cut from, as recorded
+/// in `vendor/yeptris/ENGINE_REF` (yeptris-rs#40) — e.g.
+/// `refs/tags/v0.6.59 (636d0329…)` for the pinned release plus commit.
+///
+/// `Some` only under the `vendored` feature: without it the crate
+/// links whatever libyeptris the build machine provides
+/// (`YEPTRIS_LIB_PATH` or the system search path), and the build
+/// script honestly reports that it does not know the revision.
+/// Cross-check it against [`version()`] — the vendored snapshot and
+/// the compiled engine must always agree (pinned by build.rs).
+pub const ENGINE_REV: Option<&'static str> = option_env!("YEPTRIS_ENGINE_REV");
+
 /// A parsed YAML stream. Owns the C document set; freed on drop.
 ///
 /// One `Document` may hold several documents from a `---` stream —
