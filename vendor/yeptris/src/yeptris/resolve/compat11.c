@@ -65,11 +65,8 @@ static yep_tag_id compat11(void* ctx, const char* p, uint32_t n) {
     if (n == 0 || eq(p, n, "~") || ci_eq3(p, n, "null")) {
         return 4; /* null: psych nil for ""/"~"/null (any case) */
     }
-    if (ci_eq3(p, n, "yes") || ci_eq3(p, n, "true") || ci_eq3(p, n, "on") || ci_eq3(p, n, "y")) {
-        return 3;
-    }
-    if (ci_eq3(p, n, "no") || ci_eq3(p, n, "false") || ci_eq3(p, n, "off") || ci_eq3(p, n, "n")) {
-        return 3;
+    if (yep_tag_bool_value(p, n) >= 0) {
+        return 3; /* the one bool table (tags.c): true/false sets ci */
     }
     if (eq(p, n, "=")) {
         return 10; /* value */

@@ -452,6 +452,28 @@ int yep_values_from_input(const char* yaml, size_t len, int schema_compat, yep_v
             }
             /* fall through: engine */
         }
+        /* Unicode breaks (NEL/LS/PS) normalize to '\n' BEFORE the
+         * engine, exactly as the parse entry's front-end does
+         * (parse_frontend): this drain feeds the SAME compat-grammar
+         * engine, and a raw NEL it never normalized errors where
+         * parse accepts -- the nightly's round 239 roundtrip catch
+         * ("<NEL>...<NEL> >\n <NEL>...<NEL>\nt": marshal returned
+         * ERROR_PARSE on a document yeptris_parse_ex accepted and
+         * serialized cleanly). JSON stays above this: the JSON reader
+         * keeps U+0085 raw inside strings, only the YAML reader
+         * normalizes (the parse_frontend law). Ownership rides the
+         * same `transcoded` plumbing the transcode above installed. */
+        {
+            size_t nlen = 0;
+            int kept_raw = 0;
+            char* norm = yep_engine_normalize_breaks(sys, data, data_len, &nlen, &kept_raw);
+            if (norm != NULL) {
+                yep_free(sys, transcoded);
+                transcoded = (unsigned char*)norm;
+                data = (const char*)norm;
+                data_len = nlen;
+            }
+        }
         yep_engine* eng = yep_engine_create(yep_system_allocator());
         if (eng == NULL) {
             return -1;

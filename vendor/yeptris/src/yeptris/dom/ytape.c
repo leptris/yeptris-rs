@@ -1640,15 +1640,64 @@ static int yt_f_run(yt_fused* F) {
                         col + 1 != st[depth].content_col && st[depth].phantom) {
                         yt_f_close(F, st[depth].kind);
                         st[depth].phantom = 0;
+                        st[depth].content_col =
+                            0; /* the content map is gone:
+                                * its column must not greet later pairs (the
+                                * stale-frame law, run 38179552341) — after the
+                                * chained-pending arm resumes here, a stale
+                                * column rode yt_f_open_form's sibling test and
+                                * misfiled the next pending's container as a
+                                * key-SCALAR ("b:\n c: d\nq:\n b:\n  c: d\n"
+                                * lost q's map; the nightly's run 42488986434) */
                     }
                     if (depth > 0 && st[depth].pending) {
-                        /* chained same-column pending ("a:\na:"): resolving
-                         * the first via yt_f_open corrupts the frame mapping
-                         * when the second's container carries valued pairs —
-                         * the OPEN'd map swallows the second key as the
-                         * first pair's value (the nightly's run 38110714729
-                         * tree corruption). The engine owns the shape */
-                        return 1;
+                        /* a chained pending ("a:\na:", the deep-nesting
+                         * "k:\n  k:\n    k:" ladder): resolve the outer
+                         * one before the sibling's frame takes the slot.
+                         * A same-column sibling key (col == the pending's
+                         * own column) gives the pending a NULL value —
+                         * the null pair MUST land now, or the OPEN'd
+                         * container swallows the sibling key as its
+                         * first pair's value (the nightly's run
+                         * 38110714729 tree corruption: {a: a, ?{b: c}:
+                         * h} instead of {a: null, a: {b: c}, h: v}).
+                         * When the OPEN form fired, the null pairs
+                         * INSIDE the opened container (parent → {k:
+                         * null}); under the key-SCALAR form it completes
+                         * the key's pair in the parent's map. A deeper
+                         * line (col > indent) opens the pending's
+                         * container and the chain nests. Anchored
+                         * pendings keep the engine: their anchor rides
+                         * the event path (yt_f_open drops the name) */
+                        if (st[depth].aid != 0) {
+                            return 1;
+                        }
+                        uint8_t of = yt_f_open_form(&st[depth - 1], depth == 1, st[depth].indent);
+                        if (aid != 0 && of == 0) {
+                            /* the outer pending resolved as a SIBLING
+                             * key-SCALAR: its value container is "the pair's",
+                             * materialized by the next OPEN-class record — but
+                             * the anchored pending resolves through the event
+                             * path, which emits its KEY SCALAR *before* the
+                             * anchored MAP_START. That key pairs with the
+                             * stranded outer key (the pair's value slot) and
+                             * the anchored map strands as a sibling key of the
+                             * parent: "2: e\n4:\n  5: &5\n    5: e\n7: s"
+                             * built {2:e, 4:"5", {5:e}&5:"7", s:null} instead
+                             * of {2:e, 4:{5:{5:e}&5}, 7:s} (the nightly's
+                             * crash-d8e3b3f392c37a62257576ce20d5a19b351f66ad,
+                             * round 213 — the first shape where a completed
+                             * pair arms root_pair_col BEFORE the chain). The
+                             * engine resolves the composition. */
+                            return 1;
+                        }
+                        yt_f_open(F, &st[depth], of);
+                        root_open = 1;
+                        if (col == st[depth].indent) {
+                            (void)yt_put(t, yt_props(YTP_SCALAR, 0, 0x0904u));
+                            yt_f_empty_span(F);
+                        }
+                        st[depth].pending = 0;
                     }
                     /* a spent key-SCALAR frame (resolved, phantom closed,
                      * no map of its own) gives its slot to the sibling —

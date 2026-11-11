@@ -67,6 +67,9 @@ struct yeptris_stream_iter {
     YeptrisStatus last_status;       /* the LAST next()'s per-document verdict */
     uint32_t last_line;
     uint32_t last_col;
+    size_t last_off; /* the last SUCCESSFUL document's slice
+                      * in the (post-gate) buffer space */
+    size_t last_len;
 };
 
 yeptris_stream_iter* yeptris_stream_iter_new(const char* buf, size_t len,
@@ -127,6 +130,8 @@ static void it_fail(struct yeptris_stream_iter* it, YeptrisStatus st, uint32_t l
     it->last_status = st;
     it->last_line = line;
     it->last_col = col;
+    it->last_len = 0; /* the slice accessor must not serve a stale frame
+                       * (the success path sets off/len right after) */
 }
 
 static int engine_opts(yep_engine* eng, const YeptrisParseOptions* opts) {
@@ -290,12 +295,14 @@ YeptrisStatus yeptris_stream_iter_next(struct yeptris_stream_iter* it, YeptrisDo
             }
             return it->last_status;
         }
+        it_fail(it, YEPTRIS_OK, 0, 0);
+        it->last_off = it->cursor;
+        it->last_len = pos;
         it->cursor += pos;
         it->index++;
         if (index != NULL) {
             *index = it->index - 1;
         }
-        it_fail(it, YEPTRIS_OK, 0, 0);
         *out = doc;
         return YEPTRIS_OK;
     }
@@ -313,6 +320,31 @@ YeptrisStatus yeptris_stream_iter_status(const struct yeptris_stream_iter* it, u
         *col = it->last_col;
     }
     return it->last_status;
+}
+
+/* The last successful document's slice (parse.h): the host's value
+ * route re-parses exactly these bytes — one typing SSOT. */
+YeptrisStatus yeptris_stream_iter_slice(const struct yeptris_stream_iter* it, size_t* off,
+                                        size_t* len) {
+    if (it == NULL || off == NULL || len == NULL) {
+        return YEPTRIS_ERROR_ARG;
+    }
+    if (it->last_status != YEPTRIS_OK || it->last_len == 0) {
+        return YEPTRIS_ERROR_ARG; /* a failure or the stream end was the last step */
+    }
+    *off = it->last_off;
+    *len = it->last_len;
+    return YEPTRIS_OK;
+}
+
+YeptrisStatus yeptris_stream_iter_buffer(const struct yeptris_stream_iter* it, const char** buf,
+                                         size_t* len) {
+    if (it == NULL || buf == NULL || len == NULL) {
+        return YEPTRIS_ERROR_ARG;
+    }
+    *buf = it->buf;
+    *len = it->len;
+    return YEPTRIS_OK;
 }
 
 void yeptris_stream_iter_free(struct yeptris_stream_iter* it) {

@@ -76,12 +76,25 @@ static inline void yep_stopset_init(yep_stopset* ss, const unsigned char bitmap[
  * end is the first \n/\r at/after pos (or len); indent the first
  * byte != ' ' (spaces only — tabs are the caller's rule, as in
  * yep_scan_line); stop the first block-plain stop byte at/after the
- * indent and strictly before end, stop_set=0 when none exists. */
+ * indent and strictly before end, stop_set=0 when none exists.
+ * stop2 is the SECOND block-plain stop byte at/after indent (same
+ * class as stop: \n \r # :), stop2_set=0 when none exists — the
+ * value-side side output (TODO.max-perf/03): the pair arm's plain
+ * value starts past stop, so its first stop byte is stop2, computed
+ * over the same sweep instead of a second pass. flags bit0 mirrors
+ * stop2_set (uint32-packed so the struct stays sweep-width); bit1
+ * has_high marks any byte >= 0x80 in [pos, end) — the multibyte
+ * break-lead law needs the lead probe, so a facts consumer may take
+ * a zero-probe fast path only when the span is pure ASCII. */
+#define YEP_FACTS_STOP2 0x1u
+#define YEP_FACTS_HIGH 0x2u
 typedef struct yep_line_facts {
     uint32_t end;
     uint32_t indent;
     uint32_t stop;
     uint32_t stop_set;
+    uint32_t stop2;
+    uint32_t flags;
 } yep_line_facts;
 
 /* The flow-kernel chunk classifier's output (one <=32-byte chunk):

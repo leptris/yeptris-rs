@@ -486,8 +486,68 @@ static int shape_val_bail(unsigned char c, const char* p, size_t len, size_t at)
     }
 }
 
+/* The plain value span straight from the fused facts — the value-side
+ * mirror of shape_key_span (TODO.max-perf/03): the pair's value starts
+ * past the key's stop, so its first stop byte is facts stop2 (or the
+ * break when no second stop exists), already classified by the same
+ * sweep. The terminating law is re-checked exactly as the walking
+ * scan would apply it; a non-terminating stop or a high byte (the
+ * multibyte lead probe's territory) hands the span to the walk. The
+ * LineShape spec pins the two together. */
+static yep_span shape_value_span(const char* p, size_t len, size_t vt, const yep_line_facts* f) {
+    yep_span v;
+    v.start = (uint32_t)vt;
+    v.term = YEP_TERM_EOF;
+    /* Long spans only: the walking scan's own tiny gate keeps a short
+     * value's scalar byte loop (cheaper than any facts read); below
+     * the threshold the fast path fired on shapes whose walk was
+     * already optimal and paid the kernel additions on every line
+     * (the anchor-heavy ABBA loss). 64 matches the walk's tiny gate. */
+    if (!(f->stop_set && f->stop < vt && !(f->flags & YEP_FACTS_HIGH) &&
+          (size_t)(f->end - vt) >= 64)) {
+        return yep_scan_plain(p, len, vt, 0);
+    }
+    size_t cand = 0;
+    int have = 0;
+    if (f->flags & YEP_FACTS_STOP2) {
+        if (f->stop2 >= vt) {
+            cand = f->stop2;
+            have = 1;
+        }
+    } else if (f->end >= vt) {
+        /* no second stop before the break: the first stop byte at or
+         * after the value start is the break itself */
+        cand = f->end;
+        have = 1;
+    }
+    if (have && cand <= len) {
+        if (cand == len) {
+            v.end = (uint32_t)len;
+        } else {
+            unsigned char c = (unsigned char)p[cand];
+            if (c == '\n' || c == '\r') {
+                v.end = (uint32_t)cand;
+                v.term = YEP_TERM_EOL;
+            } else if (c == ':' && yep_colon_terminates(p, len, cand, 0)) {
+                v.end = (uint32_t)cand;
+                v.term = YEP_TERM_COLON;
+            } else if (c == '#' && (cand == vt || p[cand - 1] == ' ' || p[cand - 1] == '\t')) {
+                v.end = (uint32_t)cand;
+                v.term = YEP_TERM_COMMENT;
+            } else {
+                return yep_scan_plain(p, len, vt, 0); /* non-terminating: walk */
+            }
+        }
+        while (v.end > v.start && (p[v.end - 1] == ' ' || p[v.end - 1] == '\t')) {
+            v.end--;
+        }
+        return v;
+    }
+    return yep_scan_plain(p, len, vt, 0);
+}
+
 static void shape_value(const char* p, size_t len, const yep_line_info* li, size_t vt,
-                        yep_line_shape* s) {
+                        const yep_line_facts* f, yep_line_shape* s) {
     s->val_start = (uint32_t)vt;
     if (vt >= li->end || p[vt] == '#') { /* '#' here follows a blank by construction */
         s->val = YEP_LVAL_EMPTY;
@@ -514,7 +574,7 @@ static void shape_value(const char* p, size_t len, const yep_line_info* li, size
         }
         if (t < li->end && p[t] != '#' && !shape_val_bail((unsigned char)p[t], p, len, t) &&
             yep_plain_first_ok((unsigned char)p[t])) {
-            yep_span v = yep_scan_plain(p, len, t, 0);
+            yep_span v = shape_value_span(p, len, t, f);
             if (v.term != YEP_TERM_COLON && v.end > v.start) {
                 s->val = YEP_LVAL_ANCHOR_PLAIN;
                 s->anchor_end = (uint32_t)a_end;
@@ -527,7 +587,7 @@ static void shape_value(const char* p, size_t len, const yep_line_info* li, size
     if (shape_val_bail(c, p, len, vt) || !yep_plain_first_ok(c)) {
         return;
     }
-    yep_span v = yep_scan_plain(p, len, vt, 0);
+    yep_span v = shape_value_span(p, len, vt, f);
     if (v.term == YEP_TERM_COLON) {
         return; /* a second terminating ':' is compact/error territory */
     }
@@ -591,7 +651,7 @@ void yep_scan_shape_f(const char* p, size_t len, const yep_line_info* li, const 
         }
         s->kind = YEP_LSHAPE_DASH;
         s->dash = (uint32_t)t;
-        shape_value(p, len, li, vt, s);
+        shape_value(p, len, li, vt, f, s);
         return;
     }
 
@@ -617,7 +677,7 @@ void yep_scan_shape_f(const char* p, size_t len, const yep_line_info* li, const 
             s->key_start = k.start;
             s->key_end = k.end;
             s->colon = (uint32_t)colon;
-            shape_value(p, len, li, vt, s);
+            shape_value(p, len, li, vt, f, s);
         }
     }
 }
@@ -689,18 +749,33 @@ yep_span yep_scan_plain(const char* p, size_t len, size_t pos, int flow) {
         size_t at = (hit < 0) ? len : i + (size_t)hit;
         /* a multibyte break inside the piece ends it like an EOL: the
          * byte stopset cannot see NEL/LS/PS, and the continuation
-         * would ride across the break into the next line's tokens */
-        if (at > i) {
-            const char* lead = (const char*)memchr(p + i, 0xC2, at - i);
-            const char* lead2 = (const char*)memchr(p + i, 0xE2, at - i);
+         * would ride across the break into the next line's tokens.
+         * EVERY lead byte in the piece must be tested: the first lead
+         * can be an ordinary multibyte character (the r169 yen U+00A5
+         * leading a NEL run) while a later one is a break — testing
+         * the first lead only declined the check there and rode the
+         * break raw into the scalar (the false-lead ride, the r74
+         * plain-ends-at-NEL law defeated by the lead's own position). */
+        int mb_broken = 0;
+        for (size_t scan = i; at > scan;) {
+            const char* lead = (const char*)memchr(p + scan, 0xC2, at - scan);
+            const char* lead2 = (const char*)memchr(p + scan, 0xE2, at - scan);
             const char* first =
                 (lead && lead2) ? (lead < lead2 ? lead : lead2) : (lead ? lead : lead2);
-            if (first != NULL && yep_scan_mb_break_len(p, len, (size_t)(first - p)) > 0) {
-                at = (size_t)(first - p);
-                i = at;
-                s.term = YEP_TERM_EOL;
+            if (first == NULL) {
                 break;
             }
+            if (yep_scan_mb_break_len(p, len, (size_t)(first - p)) > 0) {
+                at = (size_t)(first - p);
+                mb_broken = 1;
+                break;
+            }
+            scan = (size_t)(first - p) + 1; /* a false lead: advance past it */
+        }
+        if (mb_broken) {
+            i = at;
+            s.term = YEP_TERM_EOL;
+            break;
         }
         unsigned char c = (at < len) ? (unsigned char)p[at] : 0;
 

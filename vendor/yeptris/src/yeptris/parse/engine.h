@@ -53,6 +53,11 @@ int yep_engine_step(yep_engine* e, const char* chunk, size_t len, int final, con
  * allocates a fresh one if reused). Returns NULL when absent. */
 yep_pool* yep_engine_detach_pool(yep_engine* e);
 
+/* Detaches the run's break-normalizer copy (ownership moves to the
+ * caller; the caller owns the returned buffer once detached). Returns
+ * NULL when the run kept the input zero-copy. */
+char* yep_engine_detach_norm_buf(yep_engine* e, size_t* len_out);
+
 /* Implicit-typing schema for the next run (NULL: 1.2 core), and the
  * runtime nesting limit. */
 struct yep_resolver;

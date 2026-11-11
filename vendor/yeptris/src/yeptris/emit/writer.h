@@ -69,13 +69,16 @@ typedef struct yep_writer {
      * grow/flush checks run once per refill instead of once per byte;
      * 0 at run entry and whenever the guarantee lapses. */
     size_t reserve;
-    int in_flow;        /* scalars inside flow collections: plain must drop
-                           ',', '[', ']', '{', '}' — flow terminators */
-    int flow_item;      /* the NEXT scalar is a flow-SEQ item: a null must
-                           emit '~' (a bare nothing reads as "[, x]") */
-    int unserializable; /* an anchor name that cannot ride raw in flow
-                           context: the document has no safe spelling —
-                           serialize fails rather than corrupt */
+    int in_flow;                         /* scalars inside flow collections: plain must drop
+                                            ',', '[', ']', '{', '}' — flow terminators */
+    int flow_item;                       /* the NEXT scalar is a flow-SEQ item: a null must
+                                            emit '~' (a bare nothing reads as "[, x]") */
+    int unserializable;                  /* an anchor name that cannot ride raw in flow
+                                            context: the document has no safe spelling —
+                                            serialize fails rather than corrupt */
+    const struct yep_resolver* resolver; /* the document's implicit-typing
+        family (NULL = core12): the INT arm's decode needs the family's
+        own forms (leading-0 is octal in compat, decimal in core) */
 } yep_writer;
 
 typedef struct yep_emitter {

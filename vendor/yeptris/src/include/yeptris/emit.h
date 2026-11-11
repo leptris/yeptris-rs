@@ -37,11 +37,16 @@ typedef struct yeptris_emit_options {
     int canonical;          /* fixed form: flow collections, quoted strings,
                              * typed words, shortest floats; a parse of the
                              * output re-serializes byte-identically */
-    int best_width;         /* 0 = library default (80): flow collections
-                             * wrap after a value when the current line
-                             * exceeds the width (13B); with block_fold
-                             * it is also the fold column for block
-                             * scalars (#903) */
+    int best_width;         /* (#1257) the fold/wrap column, clamped the
+                             * way libyaml's emitter init does:
+                             * `best_width < 0` NEVER wraps (Psych's
+                             * `line_width: -1` unwrap); `0 <= width <=
+                             * best_indent*2` snaps to 80; 0 or absent =
+                             * the library default 80. Drives the flow
+                             * wrap (13B) and — with folding on (the
+                             * default, #1257) — the block scalar fold
+                             * column (#903). Only read when the
+                             * caller's struct is large enough. */
     int explicit_doc_start; /* nonzero: every document carries the
                              * leading --- marker (Psych/libyaml's
                              * implicit=false parity). Default 0: a
@@ -54,19 +59,20 @@ typedef struct yeptris_emit_options {
                              * (< 2 or > 9, libyaml's clamp) or 0 = the
                              * library default 2. Only read when the
                              * caller's struct is large enough. */
-    int block_fold;         /* (#903) nonzero: plain and single-quoted
-                             * scalars in block context fold at
-                             * best_width the way libyaml/Psych/PyYAML
-                             * do — at an interior single space past the
-                             * width the break replaces the space and
-                             * the continuation re-indents to
-                             * parent_col + best_indent. Default 0:
-                             * block output is width-invariant (byte-
-                             * identical with releases before the
-                             * option). Keys and flow members never
-                             * fold; canonical/JSON keep their fixed
-                             * forms. Only read when the caller's
-                             * struct is large enough. */
+    int block_fold;         /* (#903, the #1257 default flip) nonzero:
+                             * plain and single-quoted scalars in block
+                             * context fold at best_width the way
+                             * libyaml/Psych/PyYAML do — at an interior
+                             * single space past the width the break
+                             * replaces the space and the continuation
+                             * re-indents to parent_col + best_indent.
+                             * DEFAULT ON (a fold default matches
+                             * Psych's stored-file bytes; an explicit 0
+                             * unwraps, as does best_width < 0). Keys
+                             * and flow members never fold;
+                             * canonical/JSON keep their fixed forms.
+                             * Only read when the caller's struct is
+                             * large enough. */
 } yeptris_emit_options;
 
 /* Options-aware entries; opts == NULL selects the fidelity mode

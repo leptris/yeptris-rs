@@ -158,7 +158,18 @@ static yep_sview dom_str_in(yep_dom* d, const yep_view* v, int borrowed) {
         yep_sview sv = {0, 0};
         return sv;
     }
-    if (borrowed && v->p != NULL && d->input_base != NULL && (const char*)v->p >= d->input_base) {
+    /* The zero-copy law: borrow ONLY a view demonstrably inside the
+     * recorded input window. The old heap-order probe (v->p >=
+     * input_base) misfiled every engine-owned buffer that happened to
+     * sit above the caller's input — the r171 normalizer copy path
+     * (norm_buf) hands exactly such views to the pair/event builders —
+     * and the resulting input-relative offset was then layout luck per
+     * platform/build (the ubuntu-gcc / MSVC-arm / TSan / UBSan CI
+     * divergences of PR #1042). The upper bound makes the decision a
+     * pure function of the view's location class: both engines of a
+     * differential run now store identically on every platform. */
+    if (borrowed && v->p != NULL && d->input_base != NULL &&
+        (size_t)((const char*)v->p - d->input_base) + v->len <= d->input_len) {
         return yep_sv_input(d, *v);
     }
     return yep_dom_str_put(d, (const char*)v->p, v->len);

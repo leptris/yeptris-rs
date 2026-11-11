@@ -1278,13 +1278,32 @@ ldone:
      * Y79Y#4 error: defer to the engine, whose e_flow_ws owns the law
      * -- the walk's whitespace loops treat the tab as separation, which
      * accepted exactly the span the marshal drain's engine rejected,
-     * splitting parseable from marshalable (the nightly's round 120) */
-    for (size_t k = open + 1; k < len; k++) {
-        if (p[k] == '\n' && k + 1 < len && p[k + 1] == '\t') {
-            yeptris_tape_free(t);
-            return YEPTRIS_ERROR_PARSE;
+     * splitting parseable from marshalable (the nightly's round 120).
+     * clean_only skips the scan: its byte guarantees already rejected
+     * every tab in the span (LWS stops on one, the string c0 sweeps
+     * and the tail reject it), so the pair cannot exist there. The
+     * lenient lane rides memchr — a '\n'-hit vector pass instead of a
+     * two-compare byte loop over the whole span (13% of json-doc). */
+    if (!cl) {
+        size_t k = open + 1;
+        while (k < len) {
+            const char* nl = (const char*)memchr(p + k, '\n', len - k);
+            if (nl == NULL) {
+                break;
+            }
+            k = (size_t)(nl - p) + 1;
+            if (k < len && p[k] == '\t') {
+                yeptris_tape_free(t);
+                return YEPTRIS_ERROR_PARSE;
+            }
         }
     }
+    /* the >1024 simple-key verdict settles HERE when no key crossed the
+     * raw cap in lmapcolon: chars <= bytes closes the char budget too,
+     * so no key can violate the law — without this, every clean
+     * document paid yep_tape_long_simple_key's full-tape re-walk (16%
+     * of json-doc parse, the #739 residual) */
+    t->_long_key_known = 1;
     t->count = count;
     t->_src = p;
     t->_srclen = len;

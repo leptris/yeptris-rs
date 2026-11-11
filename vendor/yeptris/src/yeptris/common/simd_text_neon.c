@@ -461,8 +461,8 @@ static void yep_neon_line_facts(const char* s, size_t len, size_t pos, yep_line_
     const uint8x16_t ksp = vdupq_n_u8(' '), knl = vdupq_n_u8('\n'), kcr = vdupq_n_u8('\r'),
                      kco = vdupq_n_u8(':'), khash = vdupq_n_u8('#');
     size_t i = pos;
-    int have_end = 0, have_indent = 0, have_stop = 0;
-    uint32_t end = 0, indent = 0, stop = 0;
+    int have_end = 0, have_indent = 0, have_stop = 0, have_stop2 = 0, has_high = 0;
+    uint32_t end = 0, indent = 0, stop = 0, stop2 = 0;
     for (; i + 16 <= len; i += 16) {
         if (have_end) {
             break; /* indent <= end, stop < end: settled or absent */
@@ -490,6 +490,25 @@ static void yep_neon_line_facts(const char* s, size_t len, size_t pos, yep_line_
                 }
             }
         }
+        if (!has_high) {
+            /* any multibyte lead below the break (canon of the
+             * facts-consumer fast path: the lead probe rides only on
+             * non-ASCII lines). Full chunks test in-vector; the break
+             * chunk's tail (>= end) must not count. */
+            if (!have_end) {
+                if (vmaxvq_u8(vandq_u8(v, vdupq_n_u8(0x80))) != 0) {
+                    has_high = 1;
+                }
+            } else {
+                size_t hlim = (size_t)(end - i);
+                for (size_t k = 0; k < hlim; k++) {
+                    if ((uint8_t)s[i + k] & 0x80) {
+                        has_high = 1;
+                        break;
+                    }
+                }
+            }
+        }
         if (!have_stop && have_indent) {
             uint8x16_t st = vorrq_u8(br, vorrq_u8(vceqq_u8(v, kco), vceqq_u8(v, khash)));
             if (vmaxvq_u8(st) != 0) {
@@ -503,6 +522,32 @@ static void yep_neon_line_facts(const char* s, size_t len, size_t pos, yep_line_
                     if (c == '\n' || c == '\r' || c == '#' || c == ':') {
                         stop = (uint32_t)(i + k);
                         have_stop = 1;
+                        /* the value-side stop (TODO.max-perf/03): the
+                         * next stop byte in the same chunk */
+                        for (size_t k2 = k + 1; k2 < lim; k2++) {
+                            char c2 = s[i + k2];
+                            if (c2 == '\n' || c2 == '\r' || c2 == '#' || c2 == ':') {
+                                stop2 = (uint32_t)(i + k2);
+                                have_stop2 = 1;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        } else if (have_stop && !have_stop2 && have_indent) {
+            uint8x16_t st = vorrq_u8(br, vorrq_u8(vceqq_u8(v, kco), vceqq_u8(v, khash)));
+            if (vmaxvq_u8(st) != 0) {
+                size_t lim = 16;
+                if (have_end && end < (uint32_t)(i + 16)) {
+                    lim = (size_t)(end - i); /* stop is strictly before end */
+                }
+                for (size_t k = 0; k < lim; k++) {
+                    char c = s[i + k];
+                    if (c == '\n' || c == '\r' || c == '#' || c == ':') {
+                        stop2 = (uint32_t)(i + k);
+                        have_stop2 = 1;
                         break;
                     }
                 }
@@ -532,11 +577,23 @@ static void yep_neon_line_facts(const char* s, size_t len, size_t pos, yep_line_
                 stop_set = t.stop_set;
             }
         }
+        if (!have_stop2) {
+            if (!have_end && (t.flags & YEP_FACTS_STOP2)) {
+                stop2 = t.stop2;
+                have_stop2 = 1;
+            }
+        }
+        has_high |= (t.flags & YEP_FACTS_HIGH) != 0;
+    }
+    if (!have_stop2) {
+        stop2 = end; /* no second stop before the break */
     }
     out->end = end;
     out->indent = indent;
     out->stop = stop;
     out->stop_set = have_stop ? 1u : stop_set;
+    out->stop2 = stop2;
+    out->flags = (uint32_t)((have_stop2 ? YEP_FACTS_STOP2 : 0) | (has_high ? YEP_FACTS_HIGH : 0));
 }
 
 /* The flow-kernel chunk classifier: two 16-byte halves -> four
