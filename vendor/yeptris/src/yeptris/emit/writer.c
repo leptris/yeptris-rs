@@ -372,8 +372,11 @@ static void emit_sq(yep_writer* w, const char* p, uint32_t n) {
  * indent to parent_indent + best_indent for the scalar's own lines).
  * The folded bodies carry no breaks by construction: sc_route sends
  * multiline content to DQ/literal, so the walk only decides on ' '
- * (IS_SPACE — a tab is content). Columns are BYTES, matching the
- * engine's existing 13B flow fold; libyaml counts characters, so
+ * (IS_SPACE — a tab is content). EXCEPTION (#1268): single-quoted
+ * bodies may carry breaks when the value is single-able (no
+ * space_break/break_space/specials) — emit_sq_folded renders those
+ * breaks per libyaml's write_single_quoted. Columns are BYTES, matching
+ * the engine's existing 13B flow fold; libyaml counts characters, so
  * multi-byte content folds at slightly different points (documented
  * divergence, ASCII input folds byte-identically). */
 
@@ -410,14 +413,64 @@ static void emit_plain_folded(yep_writer* w, const char* p, uint32_t n, int fold
     }
 }
 
+/* libyaml's single_quoted_allowed predicate (emitter.c analyze):
+ * disabled ONLY by special characters, a space immediately before a
+ * break (space_break), or a break immediately followed by a space
+ * (break_space). line_breaks and trailing_space do NOT kill it — so a
+ * trailing-newline scalar like "x y z\n" rides single-quoted in
+ * libyaml/psych ('x y z\n\n  '), not double-quoted. */
+static int writer_sq_allowed(const char* p, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c < 0x20 && c != '\n' && c != '\r') {
+            return 0; /* special characters (the breaks ride the two
+                         adjacency checks below) */
+        }
+        if (c == 0x7f) {
+            return 0;
+        }
+        if (c == ' ' && i + 1 < n && (p[i + 1] == '\n' || p[i + 1] == '\r')) {
+            return 0; /* space_break */
+        }
+        if ((c == '\n' || c == '\r') && i + 1 < n && p[i + 1] == ' ') {
+            return 0; /* break_space */
+        }
+    }
+    return 1;
+}
+
 /* The single-quoted twin: '' doubling rides the same walk (a doubled
  * apostrophe is two written bytes; the column tracking through wr_put
- * prices it in automatically). */
+ * prices it in automatically). Content breaks render libyaml's
+ * write_single_quoted law: the first '\n' of a run writes an extra
+ * break (single-quoted clips one raw newline per content newline on
+ * re-parse), each break byte writes as-is, the byte after a break run
+ * re-indents to the fold column, and a trailing break re-indents
+ * before the closing quote (#1268: 'x y z\n\n  '). */
 static void emit_sq_folded(yep_writer* w, const char* p, uint32_t n, int fold_col) {
     wr_byte(w, '\'');
     uint32_t run = 0;
     uint32_t i = 0;
+    int breaks = 0;
     while (i < n) {
+        if (p[i] == '\n' || p[i] == '\r') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+            }
+            if (!breaks && p[i] == '\n') {
+                wr_byte(w, '\n');
+            }
+            wr_byte(w, p[i]);
+            breaks = 1;
+            i++;
+            continue;
+        }
+        if (breaks) {
+            wr_indent(w, fold_col);
+            breaks = 0;
+        }
         if (p[i] == '\'') {
             if (run) {
                 wr_put(w, p + i - run, run);
@@ -440,7 +493,9 @@ static void emit_sq_folded(yep_writer* w, const char* p, uint32_t n, int fold_co
         i++;
         run++;
     }
-    if (run) {
+    if (breaks) {
+        wr_indent(w, fold_col);
+    } else if (run) {
         wr_put(w, p + n - run, run);
     }
     wr_byte(w, '\'');
@@ -732,17 +787,33 @@ static uint8_t sc_route(yep_writer* w, const char* p, uint32_t len, int as_key, 
     int multiline = (len > 0 && memchr(p, '\n', len) != NULL);
     int blockable = 0;
     if (multiline && !as_key) {
+        /* libyaml's block_allowed law: trailing_space (a trailing
+         * blank), space_break (a blank immediately before a break) and
+         * special characters kill the block forms (#1264's family-A
+         * control: "x \ny" stays DQ, not `|-` with a trailing-space
+         * line); the all-whitespace and CR exclusions are the
+         * engine's established law */
         int allws = 1;
         int has_cr = 0;
+        int space_break = 0;
+        int trailing_blank = 0;
         for (uint32_t i = 0; i < len; i++) {
-            if (p[i] != ' ' && p[i] != '\t' && p[i] != '\n' && p[i] != '\r') {
+            unsigned char c = (unsigned char)p[i];
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
                 allws = 0;
             }
-            if (p[i] == '\r') {
+            if (c == '\r') {
                 has_cr = 1;
             }
+            if ((c == ' ' || c == '\t') && i + 1 < len && (p[i + 1] == '\n' || p[i + 1] == '\r')) {
+                space_break = 1;
+            }
         }
-        blockable = !allws && !has_cr;
+        if (len > 0) {
+            unsigned char last = (unsigned char)p[len - 1];
+            trailing_blank = last == ' ' || last == '\t';
+        }
+        blockable = !allws && !has_cr && !space_break && !trailing_blank;
     }
     uint8_t sty = sty_in;
     if (sty == 4 || sty == 5) {
@@ -799,9 +870,24 @@ static uint8_t sc_route(yep_writer* w, const char* p, uint32_t len, int as_key, 
             }
             return YEP_SC_SQ;
         }
+        /* libyaml's analyze keeps single_quoted_allowed through plain
+         * line breaks (only special_characters/space_break/break_space
+         * kill it), so a multiline plain-unsafe VALUE rides
+         * single-quoted — psych's 'x y z\n\n  ' shape (#1268). Keys
+         * never go multiline-simple, and flow bodies ride the
+         * breakless emit_sq, so both stay DQ. */
+        if (!as_key && !w->in_flow && writer_sq_allowed(p, len)) {
+            return YEP_SC_SQ;
+        }
         return YEP_SC_DQ;
     case 2:
-        return multiline ? YEP_SC_DQ : YEP_SC_SQ;
+        if (!multiline) {
+            return YEP_SC_SQ;
+        }
+        if (!as_key && !w->in_flow && writer_sq_allowed(p, len)) {
+            return YEP_SC_SQ;
+        }
+        return YEP_SC_DQ;
     default:
         return YEP_SC_DQ;
     }
