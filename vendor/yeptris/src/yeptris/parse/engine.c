@@ -53,6 +53,14 @@ typedef struct {
     uint8_t kind;
 } yep_frame;
 
+/* One repeat-alias memo slot: the name is an input-relative span
+ * (alias names are always raw input views), so at+len re-derive it. */
+typedef struct e_alias_slot {
+    uint32_t at;  /* offset of the name inside e->p */
+    uint32_t len; /* 0 = slot empty */
+    uint32_t ord; /* the ordinal the nametab answered */
+} e_alias_slot;
+
 struct yep_engine {
     const yep_allocator* sys;
     yep_pool* pool; /* finish pool: folded/escaped scalar content */
@@ -89,10 +97,13 @@ struct yep_engine {
                              * 38541356075) */
     uint32_t anchor_placed_cap;
     /* repeat-alias memo (TODO.restructure/71): offset/len/ordinal of
-     * the last alias resolved — hit by memcmp, not by the table */
-    uint32_t alias_memo_at;
-    uint32_t alias_memo_len;
-    uint32_t alias_memo_ord;
+     * the last alias resolved — a hit answers by an input-span word
+     * compare (yep_view_eq; no libc call), not by the table.
+     * anchor_define drops the slot when the name being (re)defined is
+     * the memo's: the table's last-definition-wins overwrite would
+     * otherwise leave the memo serving a STALE ordinal (and skip the
+     * new ordinal's unplaced check). */
+    e_alias_slot alias_memo;
     /* the line-facts memo (TODO.restructure/76): one kernel pass per
      * line feeds both the line info and the shape */
     yep_line_facts facts_cache;
@@ -149,6 +160,7 @@ struct yep_engine {
     uint32_t ev_buf_n, ev_buf_cap;
     uint32_t ev_scopes; /* active entry-buffer scopes */
     char* norm_buf;
+    size_t norm_buf_len; /* norm_buf's byte length (NULL when no copy) */
     unsigned char* enc_buf;
     /* owned UTF-16/32 transcode scratch (run-owned) */ /* owned input copy with exotic breaks
                                                            normalized */
@@ -425,17 +437,17 @@ static uint32_t anchor_id_of(yep_engine* e, yep_view name) {
      * the same alias thousands of times in a row; the memo answers
      * those with one input compare, skipping the hash + a likely
      * cache-missing probe into the (multi-MB, reserved) slots table. */
-    if (e->alias_memo_len == name.len && e->alias_memo_len != 0 &&
-        memcmp(e->p + e->alias_memo_at, name.p, name.len) == 0) {
-        return e->alias_memo_ord;
+    if (e->alias_memo.len == name.len && name.len != 0 &&
+        yep_view_eq((yep_view){e->p + e->alias_memo.at, name.len}, name)) {
+        return e->alias_memo.ord;
     }
     uint32_t id = yep_nametab_get(&e->anchors, name);
     if (id == YEP_NAMETAB_NIL) {
         return 0;
     }
-    e->alias_memo_at = (uint32_t)(name.p - e->p);
-    e->alias_memo_len = name.len;
-    e->alias_memo_ord = id;
+    e->alias_memo.at = (uint32_t)(name.p - e->p);
+    e->alias_memo.len = name.len;
+    e->alias_memo.ord = id;
     return id;
 }
 
@@ -447,30 +459,48 @@ static void e_anchor_mark(yep_engine* e, uint32_t id) {
     }
 }
 
+/* Grows the per-ordinal placed flags so flags[id-1] is writable.
+ * Returns 0 only on allocation failure (table unchanged). */
+static int anchor_placed_fit(yep_engine* e, uint32_t id) {
+    if (id <= e->anchor_placed_cap) {
+        return 1;
+    }
+    uint32_t cap = e->anchor_placed_cap ? e->anchor_placed_cap : 64;
+    while (cap < id) {
+        cap *= 2;
+    }
+    uint8_t* nb = yep_alloc(e->sys, cap);
+    if (nb == NULL) {
+        return 0;
+    }
+    if (e->anchor_placed != NULL) {
+        memcpy(nb, e->anchor_placed, e->anchor_placed_cap);
+        yep_free(e->sys, e->anchor_placed);
+    }
+    memset(nb + e->anchor_placed_cap, 0, cap - e->anchor_placed_cap);
+    e->anchor_placed = nb;
+    e->anchor_placed_cap = cap;
+    return 1;
+}
+
 static uint32_t anchor_define(yep_engine* e, yep_view name) {
     /* Last definition wins (libyaml parity); OOM leaves the anchor
      * undefined so its alias errors. The VALUE is the anchor's 1-based
      * ordinal — sinks key on it and skip the name hash entirely. */
     uint32_t id = ++e->anchor_serial;
-    if (id > e->anchor_placed_cap) {
-        uint32_t cap = e->anchor_placed_cap ? e->anchor_placed_cap : 64;
-        while (cap < id) {
-            cap *= 2;
-        }
-        uint8_t* nb = yep_alloc(e->sys, cap);
-        if (nb == NULL) {
-            e->anchor_serial--;
-            return 0; /* OOM: the anchor stays undefined, its alias errors */
-        }
-        if (e->anchor_placed != NULL) {
-            memcpy(nb, e->anchor_placed, e->anchor_placed_cap);
-            yep_free(e->sys, e->anchor_placed);
-        }
-        memset(nb + e->anchor_placed_cap, 0, cap - e->anchor_placed_cap);
-        e->anchor_placed = nb;
-        e->anchor_placed_cap = cap;
+    if (!anchor_placed_fit(e, id)) {
+        e->anchor_serial--;
+        return 0; /* OOM: the anchor stays undefined, its alias errors */
     }
     yep_nametab_set(&e->anchors, name, id);
+    /* A (re)definition changes the ordinal the table answers for THIS
+     * name: a memo still naming it would serve the OLD ordinal
+     * (violating last-definition-wins) and skip the new ordinal's
+     * unplaced check. */
+    if (e->alias_memo.len == name.len && name.len != 0 &&
+        yep_view_eq((yep_view){e->p + e->alias_memo.at, name.len}, name)) {
+        e->alias_memo.len = 0;
+    }
     return id;
 }
 
@@ -1341,9 +1371,12 @@ static yep_view e_resolve_tag(yep_engine* e, yep_view tag) {
 /* Parses &anchor / !tag runs at the cursor into *anchor / *tag. A node
  * carries at most one of each (c-ns-properties): a second property of
  * the same kind is the suite's 4JVG error. Keeping the last one let a
- * mutated anchor run read differently from libyaml (catch 156). */
-static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
-    int have_anchor = 0, have_tag = 0;
+ * mutated anchor run read differently from libyaml (catch 156).
+ * *have_anchor / *have_tag carry that across CALLS — the flow node
+ * parse re-runs the scan when a property rides the next line, and the
+ * duplicate law must hold across the gap. */
+static void e_props_ex(yep_engine* e, yep_view* anchor, yep_view* tag, int* have_anchor,
+                       int* have_tag) {
     for (;;) {
         e_skip_inline_space(e);
         if (e->pos >= e->len) {
@@ -1351,11 +1384,11 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
         }
         unsigned char c = (unsigned char)e->p[e->pos];
         if (c == '&') {
-            if (have_anchor) {
+            if (*have_anchor) {
                 e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
                 return;
             }
-            have_anchor = 1;
+            *have_anchor = 1;
             size_t start = e->pos + 1;
             e->pos = yep_scan_prop_end(e->p, e->len, start);
             anchor->p = e->p + start;
@@ -1380,7 +1413,24 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
              * keep it (libyaml rejects those: "&a: key: v", W5VH's
              * value position — suite-VALID, ledgered). The colon
              * re-lexes as the key indicator and the existing colon
-             * arm builds the anchored null key. */
+             * arm builds the anchored null key.
+             *
+             * The r228 nightly (run 42645063770, crash-8100227a)
+             * caught the PROPS-LED follower: "&k2: ! {\n}" — the run
+             * between the separator and the collection is the VALUE's
+             * own properties, so libyaml still reads the anchored null
+             * key (tag "<!>" on the flow map); yeptris instead rode
+             * the colon into the name and stamped "k2:" + tag on the
+             * map itself, and the anchor-led twin "&k2: &v {...}"
+             * outright REJECTED (duplicate anchor) where libyaml
+             * accepts. The follower scan now crosses ONE props run
+             * ("!tag" / "&anch", verbatim "!<!..>" included —
+             * scan_prop_end ends at a blank/break like the name scan)
+             * before the indicator check, and a crossed run
+             * un-consumes regardless of what follows: the tag/plain
+             * member "&k2: ! t" reads the same pair in libyaml. The
+             * plain-led twins (no props run — "&a: key", W5VH) never
+             * cross one and keep riding. */
             if (e->p[e->pos - 1] == ':') {
                 /* the follower scan crosses blanks, breaks AND
                  * comments: the pair separator at line end still opens
@@ -1393,6 +1443,7 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
                  * blank-equivalent here: skip it to its break and keep
                  * scanning. */
                 size_t t = e->pos;
+                int rode_props = 0;
                 for (;;) {
                     while (t < e->len && (e->p[t] == ' ' || e->p[t] == '\t' || e->p[t] == '\n' ||
                                           e->p[t] == '\r')) {
@@ -1404,10 +1455,26 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
                         }
                         continue;
                     }
+                    /* the r228 props-led law: one props run between
+                     * the separator and the follower belongs to the
+                     * VALUE node — a second keeps the first's verdict
+                     * ("&k2: !t &a {" still un-consumes on the "!") */
+                    if (!rode_props && t < e->len && (e->p[t] == '!' || e->p[t] == '&')) {
+                        t = yep_scan_prop_end(e->p, e->len, t + 1);
+                        rode_props = 1;
+                        continue;
+                    }
                     break;
                 }
                 if (t < e->len &&
                     (e->p[t] == '[' || e->p[t] == '{' || e->p[t] == '|' || e->p[t] == '>')) {
+                    anchor->len -= 1;
+                    e->pos -= 1;
+                } else if (rode_props) {
+                    /* a crossed props run is the value's own: libyaml
+                     * reads the pair whatever follows the run — the
+                     * tag-led plain ("&k2: ! t") and the bare-tag/EOF
+                     * tail ("&k2: !") included */
                     anchor->len -= 1;
                     e->pos -= 1;
                 }
@@ -1424,11 +1491,11 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
                 return;
             }
         } else if (c == '!') {
-            if (have_tag) {
+            if (*have_tag) {
                 e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
                 return;
             }
-            have_tag = 1;
+            *have_tag = 1;
             size_t start = e->pos;
             e->pos++;
             if (e->pos < e->len && e->p[e->pos] == '<') {
@@ -1474,6 +1541,13 @@ static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
             return;
         }
     }
+}
+
+/* The one-call form: fresh duplicate state (the block node parse
+ * consumes the whole run in a single scan). */
+static void e_props(yep_engine* e, yep_view* anchor, yep_view* tag) {
+    int have_anchor = 0, have_tag = 0;
+    e_props_ex(e, anchor, tag, &have_anchor, &have_tag);
 }
 
 /* ------------------------------------------------------------- aliases */
@@ -1737,7 +1811,8 @@ static int e_flow_node(yep_engine* e, yep_event* ev, int keyish) {
     ev->line = e->line;
     ev->col = e_col(e, e->pos) + 1;
     yep_view anchor = {0}, tag = {0};
-    e_props(e, &anchor, &tag);
+    int have_anchor = 0, have_tag = 0;
+    e_props_ex(e, &anchor, &tag, &have_anchor, &have_tag);
     if (e->err.code != YEP_ERR_NONE) {
         return -1; /* e_props failed (empty anchor name, unresolved tag) */
     }
@@ -1764,6 +1839,38 @@ static int e_flow_node(yep_engine* e, yep_event* ev, int keyish) {
         return e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
     }
     c = (unsigned char)e->p[e->pos];
+    /* Properties may span line breaks in flow (libyaml scans the
+     * anchor/tag run across breaks: "&a\n!!t v" carries the tag with
+     * value v; "!t\n&a x" carries the anchor). The run above skips
+     * INLINE space only, so the cursor stopped at the break and the
+     * property byte led the plain branch instead — a plain scalar
+     * glued from tag/anchor bytes (the nightly's round 211,
+     * crash-925daa54, "&anchor\n !!312    3123]"). Re-lex the riding
+     * run with the have_* state threaded so a second property of one
+     * kind still errors (the 4JVG law). Each iteration consumes at
+     * least one byte or fails, so the loop is bounded. */
+    while (c == '&' || c == '!') {
+        e_props_ex(e, &anchor, &tag, &have_anchor, &have_tag);
+        if (e->err.code != YEP_ERR_NONE) {
+            return -1;
+        }
+        if (!yep_view_is_empty(anchor) && (memchr(anchor.p, '"', anchor.len) != NULL ||
+                                           memchr(anchor.p, '\'', anchor.len) != NULL)) {
+            return (int)e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
+        }
+        ev->anchor = anchor;
+        ev->tag = tag;
+        if (!yep_view_is_empty(anchor)) {
+            ev->anchor_id = anchor_define(e, anchor);
+        }
+        if (e_flow_ws(e) != 0) {
+            return -1;
+        }
+        if (e->pos >= e->len) {
+            return e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
+        }
+        c = (unsigned char)e->p[e->pos];
+    }
     if ((c == ',' || c == ']' || c == '}' || c == ':') &&
         (!yep_view_is_empty(anchor) || !yep_view_is_empty(tag))) {
         ev->implicit = 1; /* properties with no node: a tagged null */
@@ -4235,12 +4342,35 @@ yep_pool* yep_engine_detach_pool(yep_engine* e) {
     return p;
 }
 
+char* yep_engine_detach_norm_buf(yep_engine* e, size_t* len_out) {
+    if (e == NULL) {
+        if (len_out != NULL) {
+            *len_out = 0;
+        }
+        return NULL;
+    }
+    char* b = e->norm_buf;
+    if (len_out != NULL) {
+        *len_out = e->norm_buf_len;
+    }
+    e->norm_buf = NULL;
+    e->norm_buf_len = 0;
+    return b;
+}
+
 void yep_engine_prepare(yep_engine* e, const yep_text_stats* st) {
     if (e == NULL || st == NULL) {
         return;
     }
     if (st->amp > 0) {
         yep_nametab_reserve(&e->anchors, (uint32_t)st->amp);
+        /* every definition bumps the serial exactly once and '&' marks
+         * every definition, so amp is the serial's exact ceiling: the
+         * placed flags pre-fit here and the parse never pays the
+         * doubling chain (alloc + copy + memset per growth). Best
+         * effort — anchor_define's growth stays as the fallback for
+         * engines driven without prepare. */
+        anchor_placed_fit(e, (uint32_t)st->amp + 1);
     }
 }
 
@@ -4315,6 +4445,7 @@ const yep_stopset yep_norm_break_leads = {
  * headers). Verified against libyaml by the NormLsPs pins and the
  * fuzz-diff LS/PS comparator. */
 static int step_bs_header(const char* p, size_t len, size_t i);
+static size_t norm_next_fold_break(const char* p, size_t len, size_t i, size_t* br_len);
 
 typedef struct yep_norm_ctx {
     int quote; /* 0 none, else the opening quote char */
@@ -4326,15 +4457,44 @@ typedef struct yep_norm_ctx {
     int at_break;
     int bs_open;
     int bs_content;
-    uint32_t bs_indent; /* the header line's indent; (uint32_t)-1 = the
-                         * doc-inline root rule (markers only) */
-    uint8_t started;    /* at least one byte consumed: the walk's i == 0
-                         * clauses are stream-start, not buffer-start —
-                         * the chunked route resumes mid-stream at a ---
-                         * cut, and the carried context must say so */
-    unsigned char prev; /* the last consumed byte (valid when started):
-                         * the '#' and line-start tests peek p[i - 1],
-                         * which at a resumed buffer is carried state */
+    uint32_t bs_indent;       /* the header line's indent; (uint32_t)-1 = the
+                               * doc-inline root rule (markers only) */
+    uint8_t started;          /* at least one byte consumed: the walk's i == 0
+                               * clauses are stream-start, not buffer-start —
+                               * the chunked route resumes mid-stream at a ---
+                               * cut, and the carried context must say so */
+    unsigned char prev;       /* the last consumed byte (valid when started):
+                               * the '#' and line-start tests peek p[i - 1],
+                               * which at a resumed buffer is carried state */
+    unsigned char bb;         /* the byte immediately before the last FOLDED
+                               * break (0 = not armed): the r133 law — a
+                               * tok_start armed by a fold whose before-break
+                               * byte was plain content is a continuation
+                               * line, and its "!<" must not open a verbatim
+                               * tag (cleared wherever an indicator arms the
+                               * slot instead) */
+    unsigned char plain_open; /* a plain scalar VALUE word is in
+                               * progress (set by every non-indicator content
+                               * byte, preserved across breaks): the r147
+                               * law — the bb gate's single-byte slice misses
+                               * the run-tail shapes ("-  \n<NEL>!" arms
+                               * bb='\n', in the indicator set), so the open
+                               * keys on the value-in-progress fact: a
+                               * fold-armed tok_start over an open plain is a
+                               * continuation line whose "!<" is content,
+                               * never props */
+    int phantom_flow;         /* openers armed by the glued ':'-twin
+                               * ("a:{b]" — the #836-accepted prev==':'
+                               * clause) alone: libyaml keeps those bytes
+                               * INTERIOR to the plain (no flow collection
+                               * exists), so their depth must never arm the
+                               * r155 real-flow clear on ']' / '}' — the
+                               * walk's in_flow is monotone and the phantom
+                               * opens inflate it, which defeated the
+                               * "block context keeps the fact" law (the
+                               * r169 nightly: the ']' cleared plain_open
+                               * through the phantom and the next fold's
+                               * "!<" opened a never-closed verbatim) */
 } yep_norm_ctx;
 
 typedef struct yep_norm_tok {
@@ -4482,6 +4642,7 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
         t.n = 2;
         t.fold_off = 0;
         t.fold_len = 2;
+        c->bb = (i > 0) ? (unsigned char)p[i - 1] : '\n';
         norm_break_arms(c);
         return t;
     }
@@ -4489,6 +4650,7 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
         t.n = 3;
         t.fold_off = 0;
         t.fold_len = 3;
+        c->bb = (i > 0) ? (unsigned char)p[i - 1] : '\n';
         norm_break_arms(c);
         return t;
     }
@@ -4502,19 +4664,22 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
         c->at_break = 0;
         return t;
     }
-    if (ch == ' ' || ch == '\t') {
-        /* a value position survives spaces in block context ("k: 'x'"
-         * opens; the plain continuation "a 'b'" does not — its word
-         * did not begin with an indicator) */
-        c->tok_start = (c->in_flow > 0) ? 1 : (c->word_led || c->tok_start);
-        return t;
-    }
-
     int line_start = (!c->started || c->at_break || c->prev == '\n' || c->prev == '\r');
 
     /* block scalars: inside the fold no quote opens and every break
      * keeps its fold; the region ends at a col-0 marker, a %-line
-     * after content, or a dedent to the header line's indent */
+     * after content, or a dedent to the header line's indent. It runs
+     * BEFORE the token-space arm: a fold line's leading spaces are its
+     * INDENT, and the space arm consumed them one byte at a time (the
+     * at_break stays armed) so the indent walk below counted from the
+     * FIRST NON-SPACE byte — a one-space-indented content line read
+     * ind=0, the dedent rule (ind <= bs_indent) ended the fold
+     * mid-content, and the byte lexed as a token: "!<" armed a phantom
+     * verbatim whose breaks-ride-raw law left the whole tail
+     * unnormalized, the raw NEL run classified as one content line,
+     * and the framing walk spawned a phantom empty plain second
+     * document libyaml never emits (the r194 nightly,
+     * ">\n ! \n !<aaa: bbb\n...\n<NEL><NEL>"). */
     if (line_start && c->in_flow == 0 && c->bs_open) {
         size_t k = i;
         uint32_t ind = 0;
@@ -4528,12 +4693,52 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
             return t; /* a final line without its break */
         }
         if (p[k] == '\n' || p[k] == '\r' || p[k] == '#') {
+            /* the line ends at ANY break spelling: a multibyte break
+             * (NEL/LS/PS) FOLDS at the token tail, exactly like the
+             * '#' comment arm ends its line (the pre-r194 path: the
+             * token-space arm consumed the leading spaces one byte at
+             * a time and the line's '#' hit the comment arm, whose
+             * nel/lps case folds). Riding the break raw inside the
+             * wholesale token leaked it to the engine's verbatim
+             * block-scalar reader, and the r19-family indent
+             * transform's verify (sub ">\n #ML<NEL>\n") stopped
+             * flipping to parity — the r195 nightly ">\n#ML<NEL>". */
             size_t e = k;
-            while (e < len && p[e] != '\n') {
+            size_t bs = 0;
+            size_t br = 0;
+            while (e < len) {
+                if (p[e] == '\n') {
+                    bs = e;
+                    br = 1;
+                    e++;
+                    break;
+                }
+                if (p[e] == '\r') {
+                    bs = e;
+                    br = (e + 1 < len && p[e + 1] == '\n') ? 2 : 1;
+                    e += br;
+                    break;
+                }
+                size_t mb = yep_scan_mb_break_len(p, len, e);
+                if (mb > 0) {
+                    bs = e;
+                    br = mb;
+                    e += mb;
+                    break;
+                }
                 e++;
             }
-            t.n = (e < len) ? (e - i + 1) : (len - i);
-            c->at_break = (e < len);
+            if (br == 0) {
+                t.n = len - i;
+                c->at_break = 0;
+                return t; /* the tail rides the line to EOF */
+            }
+            t.n = e - i;
+            if (p[bs] != '\n' && p[bs] != '\r') {
+                t.fold_off = (int)(bs - i);
+                t.fold_len = (int)br;
+            }
+            c->at_break = 1;
             return t; /* blank or comment-content line */
         }
         int marker = (ind == 0 && k + 2 < len &&
@@ -4561,6 +4766,14 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
         }
     }
 
+    if (ch == ' ' || ch == '\t') {
+        /* a value position survives spaces in block context ("k: 'x'"
+         * opens; the plain continuation "a 'b'" does not — its word
+         * did not begin with an indicator) */
+        c->tok_start = (c->in_flow > 0) ? 1 : (c->word_led || c->tok_start);
+        return t;
+    }
+
     /* the header: a '>' / '|' at a value position with a valid
      * follower opens the fold (the engine's own floor is the parent's
      * column, which the walk cannot know — the header LINE's indent
@@ -4585,12 +4798,29 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
             c->bs_open = 1;
             c->bs_indent = ind;
             c->bs_content = 0;
-            size_t e = i;
-            while (e < len && p[e] != '\n') {
-                e++;
+            /* the header line ends at ANY fold break: the tail past
+             * the indicators (usually the comment) is OUTSIDE the
+             * block-content area, so the #638 fold law governs it — a
+             * NEL/LS/PS there ends the header line and the next line
+             * rides the bs branch from its own indent (the r171
+             * nightly: the '\n'-only scan swallowed " #<"+NEL+" t"
+             * whole, the NEL rode unnormalized to the engine, whose
+             * comment skip then ate the content line — empty where
+             * libyaml's IS_BREAKZ comment law reads "t") */
+            size_t br_len = 0;
+            size_t e = norm_next_fold_break(p, len, i, &br_len);
+            if (br_len > 0) {
+                t.n = (e + br_len) - i;
+                t.fold_off = (int)(e - i); /* the break FOLDS: the copy
+                                            * splices the '\n' (a
+                                            * plain-consumed multibyte
+                                            * break would ride raw) */
+                t.fold_len = (int)br_len;
+                c->at_break = 1;
+            } else {
+                t.n = len - i;
+                c->at_break = 0;
             }
-            t.n = (e < len) ? (e - i + 1) : (len - i);
-            c->at_break = (e < len);
             return t;
         }
         /* not a header ("| : [" is a mapping key): fall through */
@@ -4616,24 +4846,55 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
             c->bs_open = 1;
             c->bs_indent = (uint32_t)-1;
             c->bs_content = 0;
-            size_t e = i;
-            while (e < len && p[e] != '\n') {
-                e++;
+            c->plain_open = 0; /* the marker is a document boundary */
+            /* the marker line's tail ends at any fold break (the same
+             * law as the plain header above -- the comment tail is
+             * outside the content area) */
+            size_t br_len = 0;
+            size_t e = norm_next_fold_break(p, len, i, &br_len);
+            if (br_len > 0) {
+                t.n = (e + br_len) - i;
+                t.fold_off = (int)(e - i); /* the break folds (the header twin) */
+                t.fold_len = (int)br_len;
+                c->at_break = 1;
+            } else {
+                t.n = len - i;
+                c->at_break = 0;
             }
-            t.n = (e < len) ? (e - i + 1) : (len - i);
-            c->at_break = (e < len);
             return t;
         }
-        t.n = 3; /* the marker rides; the line's tail processes normally */
+        t.n = 3;           /* the marker rides; the line's tail processes normally */
+        c->plain_open = 0; /* a document boundary: the next node's
+                            * props position must not inherit the
+                            * previous document's open plain */
         return t;
     }
 
     if (c->tok_start) {
         c->at_break = 0; /* any content byte ends the line-start state */
         if (ch == '!' && i + 1 < len && p[i + 1] == '<') {
-            c->in_verbatim = 1;
-            t.n = 2;
-            return t;
+            /* the r133 law: a tok_start armed by a FOLDED break whose
+             * before-break byte was plain content is a continuation
+             * line — its "!<" is plain content, not props; only a
+             * new-node position (an indicator like ':' armed the slot)
+             * opens a verbatim tag. Unconditioned, the continuation's
+             * "!<" opened a phantom verbatim that swallowed the rest
+             * of the input: later NELs rode unnormalized and the plain
+             * fold emitted raw lead-stripped 0x85 into the value. The
+             * r147 law extends the gate to the run-tail shapes the
+             * single-byte bb probe misses ("-  \n<NEL>!" arms bb='\n',
+             * in the indicator set; "key: <NEL><NEL>!" arms bb=0x85,
+             * outside it — both while a plain VALUE is in progress,
+             * which plain_open carries): a plain value word open
+             * across the fold means the line is a continuation, and
+             * libyaml's 1.1 read folds the same NELs to newlines
+             * (READ_LINE spells NEL -> LF, the fold law joins). */
+            int bb_plain = c->bb != 0 && !strchr("&*!-?:,[]{}#%'\"|> \t\n\r", c->bb);
+            if (!bb_plain && !c->plain_open) {
+                c->in_verbatim = 1;
+                t.n = 2;
+                return t;
+            }
         }
         c->word_led = (ch == '&' || ch == '*' || ch == '!' || ch == '-' || ch == '?' || ch == ':' ||
                        ch == ',' || ch == '[' || ch == '{' || ch == ']' || ch == '}');
@@ -4655,10 +4916,29 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
          * fold rendered one fold-SPACE per break instead of the n-1
          * newline tally (the r98 nightly — the #836 phantom's flow
          * half; the comma half landed in #836 itself). */
+        int phantom = !c->tok_start; /* the glued ':'-twin alone (the
+                                      * #836-accepted prev==':' state):
+                                      * libyaml keeps the opener interior
+                                      * to the plain, so its depth rides
+                                      * phantom_flow, never the real count */
         c->tok_start = 1;
+        if (phantom) {
+            c->phantom_flow++;
+            /* the phantom opener is INTERIOR to the open plain VALUE
+             * word (libyaml's read keeps the bytes content) — the fact
+             * must survive it, or the r147 gate dies two shapes later:
+             * the slot the opener armed says "new node" while the plain
+             * is still open, and a following "!<" opened a phantom
+             * verbatim that swallowed the rest of the input (the r217
+             * nightly: "a:{!<x>"+NEL — "k:{" armed by the ':' indicator
+             * clears a live plain_open). The r155/r169 law's opener
+             * twin: block context keeps the fact. */
+        } else {
+            c->plain_open = 0; /* the slot was armed by an indicator */
+        }
         c->in_flow++;
     } else if (ch == ',') {
-        /* flow separators glue the next token — THE COMMA IN FLOW
+        /* flow separators glue the next token — THE COMMA IN REAL FLOW
          * ONLY. The unconditioned arm let a BLOCK plain's interior
          * comma arm tok_start, a following "!<" opened a phantom
          * verbatim tag that swallowed the rest of the input (breaks
@@ -4667,22 +4947,66 @@ static yep_norm_tok norm_step(yep_norm_ctx* c, const char* p, size_t len, size_t
          * fold's blank-line tally lost them (the r96 nightly,
          * yeptris#836, "b,,,!<!<"+NEL^3). ':' stays unconditioned:
          * the BLOCK value position rides it ("k: 'x'" opens the
-         * quote, the NormLsPs pins). */
-        if (c->in_flow > 0) {
+         * quote, the NormLsPs pins). The r217 law: "in flow" means
+         * REAL flow depth (the r155/r169 gate) — the glued ':'-twin's
+         * phantom opens inflate in_flow without any flow collection
+         * existing in libyaml's read, so their commas are INTERIOR
+         * plain content ("o&a-:{*,,,!<!<"+NEL^3: the phantom '{'
+         * inflated in_flow, the interior ','s armed a props slot, and
+         * the "!<" opened the phantom verbatim again). */
+        if (c->in_flow > c->phantom_flow) {
             c->tok_start = 1;
+            c->bb = 0; /* the slot was armed by an indicator, not a fold */
+            c->plain_open = 0;
         }
     } else if (ch == ':') {
         /* the separator law (#833's own predicate): a ':' arms the
          * next token slot only before a blank/EOL/EOF — "k: 'x'"
          * opens the value quote (the NormLsPs pins) while an
          * interior "x:!<" of a block plain does NOT (the phantom
-         * verbatim again, the #836 colon-led twin) */
+         * verbatim again, the #836 colon-led twin). The r217 law for
+         * the DECLINED ':': a ':' before a non-blank byte is interior
+         * to a plain, or the plain's own LEAD ("k:\t:{!<" — the
+         * separating ':'+tab left plain_open dead, the value plain's
+         * lead ':' declines, and the phantom '{' behind it armed a
+         * props slot both of whose gates were dead — the "!<" opened
+         * the phantom verbatim and the NEL run rode raw). The decline
+         * IS the plain-context fact: arm the value word here. */
         if (i + 1 >= len || p[i + 1] == ' ' || p[i + 1] == '\t' || p[i + 1] == '\n' ||
             p[i + 1] == '\r') {
             c->tok_start = 1;
+            c->bb = 0; /* the slot was armed by an indicator, not a fold */
+            c->plain_open = 0;
+        } else {
+            c->plain_open = 1;
         }
     } else if (ch == ']' || ch == '}') {
         c->tok_start = 1;
+        c->bb = 0; /* the slot was armed by an indicator, not a fold */
+        if (c->in_flow > c->phantom_flow) {
+            c->plain_open = 0;
+        }
+        /* block context keeps the fact: a plain cannot start with
+         * ']' / '}' (c-indicator), so reaching this byte with the value
+         * word open means it is INTERIOR content (the catch-85 law's
+         * indicator twin) — the r155 law. The unconditional clear let
+         * the next fold-armed "!<" open a phantom verbatim (the r147
+         * gate's blind-spot twin: the ']' byte also blanks bb_plain —
+         * it is in the bb indicator set — so both gate inputs said
+         * "new node") and the NELs after it rode unnormalized raw into
+         * the plain fold ("(999999;!<1]" +NEL+ "!<" +NEL+ "¥" +NEL^2).
+         * The clear keys on REAL flow (in_flow above the phantom
+         * depth): the glued ':'-twin's phantom opens inflate in_flow
+         * without any flow collection existing in libyaml's read, and
+         * the inflated count defeated the law on a plain's interior ']'
+         * ("a:{b]" +NEL — the r169 nightly's fifth arming shape). */
+    }
+    /* the r147 law: a non-indicator content byte begins/continues a
+     * plain scalar VALUE word — the fact survives breaks (breaks only
+     * arm tok_start), so a later fold-armed "!<" reads it (indicator
+     * bytes leave the fact to their own arm above) */
+    if (!strchr("&*!-?:,[]{}#%'\"|>", ch)) {
+        c->plain_open = 1;
     }
     return t;
 }
@@ -4798,6 +5122,24 @@ static char* norm_breaks_run(const yep_allocator* sys, const char* p, size_t len
         } else {
             memcpy(out + o, p + j, (size_t)t.fold_off);
             o += (size_t)t.fold_off;
+            /* A raw CR copied just before this rewrite must not pair
+             * with the replacement '\n' into a phantom CRLF: the byte
+             * readers count CR LF as ONE break (SKIP_LINE's pair law)
+             * while the input's CR + NEL/LS/PS were TWO — the rewrite
+             * silently halved the fold's break tally (";!\r<NEL>\r;\r"
+             * read ";!\\n;" where the (n-1) newline law says
+             * ";!\\n\\n;", the r188 nightly). Rewrite the WHOLE
+             * trailing run of raw CRs to '\n' — one CR is one break,
+             * and only the run's last byte could ever touch the
+             * replacement, but a shallower rewrite would just move the
+             * phantom pair one byte left ("a\r\r<NEL>" -> "a\r\n\n"
+             * re-pairs on the first CR; the run makes it "a\n\n\n",
+             * four breaks in, four breaks out). LFs never pair with
+             * each other, so the run's count survives everywhere the
+             * fold law counts breaks. */
+            for (size_t t2 = o; t2 > 0 && out[t2 - 1] == '\r'; t2--) {
+                out[t2 - 1] = '\n';
+            }
             out[o++] = '\n';
             memcpy(out + o, p + j + t.fold_off + t.fold_len,
                    t.n - (size_t)t.fold_off - (size_t)t.fold_len);
@@ -4822,6 +5164,7 @@ static const char* e_normalize_breaks(yep_engine* e, const char* p, size_t len, 
         return p;
     }
     e->norm_buf = out;
+    e->norm_buf_len = out ? *out_len : 0;
     return out;
 }
 
@@ -4981,6 +5324,41 @@ void yep_engine_destroy(yep_engine* e) {
  * that flow to the depth cap, chunked cut and errored at 2:1).
  * Returns 1 valid, 0 definitely not a header, -1 truncated (the tail
  * may still complete a valid header). */
+
+/* The next FOLD break at or after i under the #638 fold law outside
+ * quotes ('\n', lone '\r' / CRLF, NEL, LS/PS): returns its start
+ * offset and stores its consumed length, or returns 0 with *br_len 0
+ * when the tail holds none. A truncated multibyte lead at the end
+ * reads as "none": the one-shot walk runs on validated complete input
+ * (a dangling lead never arrives), and the streaming scanner holds the
+ * header line for the bytes that may still complete it. */
+static size_t norm_next_fold_break(const char* p, size_t len, size_t i, size_t* br_len) {
+    size_t e = i;
+    *br_len = 0;
+    while (e < len) {
+        unsigned char ec = (unsigned char)p[e];
+        if (ec == '\n') {
+            *br_len = 1;
+            return e;
+        }
+        if (ec == '\r') {
+            *br_len = (e + 1 < len && p[e + 1] == '\n') ? 2 : 1;
+            return e;
+        }
+        if (ec == 0xC2 && e + 1 < len && (unsigned char)p[e + 1] == 0x85) {
+            *br_len = 2;
+            return e;
+        }
+        if (ec == 0xE2 && e + 2 < len && (unsigned char)p[e + 1] == 0x80 &&
+            ((unsigned char)p[e + 2] & 0xFE) == 0xA8) {
+            *br_len = 3;
+            return e;
+        }
+        e++;
+    }
+    return 0;
+}
+
 static int step_bs_header(const char* p, size_t len, size_t i) {
     size_t k = i + 1;
     int chomp = 0, indent = 0, space = 0;
@@ -5174,6 +5552,12 @@ static size_t step_scan(yep_stepstate* st) {
              * ate the '---' marker, chunked errored on the unterminated
              * prefix — the nightly's run 38534965021) */
             st->tok_start = (st->in_flow > 0) ? 1 : st->word_led;
+            /* the one-shot walk's law: the first post-break byte
+             * clears the line-start fact — spaces included, or an
+             * INDENTED "  ---" (a plain/seq position) read as a
+             * col-0 marker through the line-start gate and the cut
+             * landed inside the line (the r171 gate twin) */
+            st->at_break = 0;
             continue;
         }
         if (st->tok_start) {
@@ -5250,7 +5634,11 @@ static size_t step_scan(yep_stepstate* st) {
         }
         if (st->in_flow == 0) {
             char prev = i > 0 ? p[i - 1] : '\n';
-            if (prev != '\n' && prev != '\r') {
+            if (prev != '\n' && prev != '\r' && !st->at_break) {
+                /* the one-shot walk's line_start law honors at_break
+                 * (-- the mb-break arms arm it); the prev-only check
+                 * missed every line that opens after a NEL/LS/PS, so
+                 * the ride-along never fired there (the r171 twin) */
                 continue;
             }
             /* Block scalars: once a '>' / '|' header is seen, its
@@ -5326,15 +5714,26 @@ static size_t step_scan(yep_stepstate* st) {
                     }
                     st->bs_open = 1;
                     st->bs_indent = ind;
-                    size_t e = i;
-                    while (e < st->len && p[e] != '\n') {
-                        e++;
-                    }
-                    if (e >= st->len) {
+                    /* the header line ends at ANY fold break (the
+                     * one-shot walk's law, norm_next_fold_break): the
+                     * tail past the indicators is outside the
+                     * block-content area, so the #638 fold law
+                     * governs it. The break arms' state rides here
+                     * too — at_break opens the content line's
+                     * ride-along through the line-start gate (the
+                     * r171 nightly: the '\n'-only scan never
+                     * completed a NEL-terminated header line and
+                     * held the window at the '>' forever) */
+                    size_t br_len = 0;
+                    size_t e = norm_next_fold_break(p, st->len, i, &br_len);
+                    if (br_len == 0) {
                         hold = i; /* an incomplete header line */
                         break;
                     }
-                    i = e;
+                    st->tok_start = 1;
+                    st->word_led = 0;
+                    st->at_break = 1;
+                    i = e + br_len - 1; /* the loop's i++ lands past the break */
                     continue;
                 }
                 /* Not a header ("| : [" is a mapping key): fall through
@@ -5512,6 +5911,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
     }
     yep_free(e->sys, e->norm_buf);
     e->norm_buf = NULL;
+    e->norm_buf_len = 0;
     /* enc_buf is NOT reset here: yep_engine_run's front-end may have
      * transcoded THIS call's input into it microseconds ago -- buf
      * points into it, and freeing it before the break-normalize scan
@@ -5536,7 +5936,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
     if (e->anchor_placed != NULL) {
         memset(e->anchor_placed, 0, e->anchor_placed_cap);
     }
-    e->alias_memo_len = 0;
+    e->alias_memo.len = 0;
     e->tagmap_n = 0;
     e->saw_yaml = 0;
     e->doc_begin = (size_t)-1;
@@ -5771,11 +6171,11 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
                 if (e->anchor_placed != NULL) {
                     memset(e->anchor_placed, 0, e->anchor_placed_cap);
                 }
-                e->alias_memo_len = 0; /* so are anchors */
-                e->alias_memo_len = 0; /* and the repeat-alias memo: doc 1's
-                                        * "*ORIGIN" memoized the ordinal and doc 2's
-                                        * identical name answered from it ACROSS the
-                                        * boundary (the nightly's run 38266487549) */
+                /* so are anchors — and the repeat-alias memo: doc 1's
+                 * "*ORIGIN" memoized the ordinal and doc 2's identical
+                 * name answered from it ACROSS the boundary (the
+                 * nightly's run 38266487549) */
+                e->alias_memo.len = 0;
             }
             e_event_init(&ev, YEP_EV_DOCUMENT_START);
             ev.style = 1; /* explicit marker */
@@ -5862,7 +6262,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
                 if (e->anchor_placed != NULL) {
                     memset(e->anchor_placed, 0, e->anchor_placed_cap);
                 }
-                e->alias_memo_len = 0;
+                e->alias_memo.len = 0;
                 if (emit_now(e, &ev) != 0) {
                     return -2;
                 }
@@ -6101,7 +6501,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
         if (e->anchor_placed != NULL) {
             memset(e->anchor_placed, 0, e->anchor_placed_cap);
         }
-        e->alias_memo_len = 0;
+        e->alias_memo.len = 0;
     }
     if (emit_end) {
         e_event_init(&ev, YEP_EV_STREAM_END);

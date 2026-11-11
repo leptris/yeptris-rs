@@ -82,4 +82,22 @@ yep_tag_id yep_tag_from_uri(const char* p, uint32_t len);
  * portably). */
 const char* yep_tag_float_word(const char* p, uint32_t len);
 
+/* The BOOL truth table for a resolved-bool view: 1 true, 0 false,
+ * -1 not a bool word. One table, two consumers: compat11's classify
+ * and the canonical/JSON emitter's BOOL arm — the DOM stores only the
+ * tag + source text, so the emitter re-asks the table (#937: guessing
+ * the value from the text's length spelled every non-4-char true-word
+ * false). The ci union of the families' sets (core's true/false forms
+ * are in the compat superset), so no family fact is needed. */
+int yep_tag_bool_value(const char* p, uint32_t len);
+
+/* Decode a resolved-INT view to its value through the family's own
+ * accepted forms: radix prefixes 0x/0o in both (0b and the leading-0
+ * octal + _/,/sexagesimal forms only when compat — core spells
+ * leading-0 decimal), digits otherwise. Overflow beyond the int64
+ * range returns nonzero and *out is untouched. The canonical/JSON
+ * emitter's INT arm (#937: source text like 0x1F is not a JSON
+ * token). */
+int yep_tag_int64(const char* p, uint32_t len, int compat, int64_t* out);
+
 #endif /* YEP_RESOLVER_H */

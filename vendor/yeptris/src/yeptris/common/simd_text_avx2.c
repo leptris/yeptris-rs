@@ -353,8 +353,8 @@ static void yep_avx2_line_facts(const char* s, size_t len, size_t pos, yep_line_
                   ksp = _mm256_set1_epi8(' '), kco = _mm256_set1_epi8(':'),
                   khash = _mm256_set1_epi8('#');
     size_t i = pos;
-    int have_end = 0, have_indent = 0, have_stop = 0;
-    uint32_t end = 0, indent = 0, stop = 0;
+    int have_end = 0, have_indent = 0, have_stop = 0, have_stop2 = 0, has_high = 0;
+    uint32_t end = 0, indent = 0, stop = 0, stop2 = 0;
     for (; i + 32 <= len; i += 32) {
         if (have_end) {
             break; /* indent <= end, stop < end: settled or absent */
@@ -374,6 +374,26 @@ static void yep_avx2_line_facts(const char* s, size_t len, size_t pos, yep_line_
             end = (uint32_t)(i + (size_t)yep_ctz32(br));
             have_end = 1;
         }
+        if (!has_high) {
+            /* any multibyte lead below the break (canon of the
+             * facts-consumer fast path: the lead probe rides only on
+             * non-ASCII lines). Full chunks test via movemask of the
+             * sign bits (the high bit IS the sign); the break chunk's
+             * tail (>= end) must not count. */
+            if (!have_end) {
+                if (_mm256_movemask_epi8(v)) {
+                    has_high = 1;
+                }
+            } else {
+                uint32_t hlim = (uint32_t)(end - i);
+                for (uint32_t k = 0; k < hlim; k++) {
+                    if ((uint8_t)s[i + k] & 0x80) {
+                        has_high = 1;
+                        break;
+                    }
+                }
+            }
+        }
         if (!have_stop && have_indent) {
             uint32_t st = br;
             st |= (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kco));
@@ -387,6 +407,27 @@ static void yep_avx2_line_facts(const char* s, size_t len, size_t pos, yep_line_
                 if (at >= from && (!have_end || (uint32_t)(i + at) < end)) {
                     stop = (uint32_t)(i + at);
                     have_stop = 1;
+                    /* the value-side stop (TODO.max-perf/03): the next
+                     * stop lane in the same chunk */
+                    uint32_t rest = st & (st - 1);
+                    if (rest) {
+                        uint32_t at2 = (uint32_t)yep_ctz32(rest);
+                        if (!have_end || (uint32_t)(i + at2) < end) {
+                            stop2 = (uint32_t)(i + at2);
+                            have_stop2 = 1;
+                        }
+                    }
+                }
+            }
+        } else if (have_stop && !have_stop2 && have_indent) {
+            uint32_t st = br;
+            st |= (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kco));
+            st |= (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, khash));
+            if (st) {
+                uint32_t at = (uint32_t)yep_ctz32(st);
+                if (!have_end || (uint32_t)(i + at) < end) {
+                    stop2 = (uint32_t)(i + at);
+                    have_stop2 = 1;
                 }
             }
         }
@@ -410,11 +451,23 @@ static void yep_avx2_line_facts(const char* s, size_t len, size_t pos, yep_line_
                 stop_set = t.stop_set;
             }
         }
+        if (!have_stop2) {
+            if (!have_end && (t.flags & YEP_FACTS_STOP2)) {
+                stop2 = t.stop2;
+                have_stop2 = 1;
+            }
+        }
+        has_high |= (t.flags & YEP_FACTS_HIGH) != 0;
+    }
+    if (!have_stop2) {
+        stop2 = end; /* no second stop before the break */
     }
     out->end = end;
     out->indent = indent;
     out->stop = stop;
     out->stop_set = have_stop ? 1u : stop_set;
+    out->stop2 = stop2;
+    out->flags = (uint32_t)((have_stop2 ? YEP_FACTS_STOP2 : 0) | (has_high ? YEP_FACTS_HIGH : 0));
 }
 
 /* The flow-kernel chunk classifier: one 256-bit lane pass -> four

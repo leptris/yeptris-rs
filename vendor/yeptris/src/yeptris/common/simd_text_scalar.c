@@ -202,8 +202,8 @@ int yep_text_line_facts_capped(const char* s, size_t len, size_t pos, size_t cap
                           k_ha = 0x2323232323232323ull;
     size_t whole = len - pos;
     size_t n = whole < cap ? whole : cap;
-    size_t end = n, indent = n, stop = n;
-    int have_indent = 0, stop_set = 0, have_end = 0;
+    size_t end = n, indent = n, stop = n, stop2 = n;
+    int have_indent = 0, stop_set = 0, have_end = 0, stop2_set = 0, has_high = 0;
     size_t i = 0;
     while (i < n) {
         size_t avail = n - i < 8 ? n - i : 8;
@@ -227,6 +227,9 @@ int yep_text_line_facts_capped(const char* s, size_t len, size_t pos, size_t cap
                 have_indent = 1;
             }
         }
+        if (room & x & 0x8080808080808080ull) {
+            has_high = 1; /* a multibyte lead rides below the break */
+        }
         if (have_indent && !stop_set) {
             uint64_t stm = (yep_swar_eq8(x, k_co) | yep_swar_eq8(x, k_ha)) & room;
             if (stm) {
@@ -234,7 +237,21 @@ int yep_text_line_facts_capped(const char* s, size_t len, size_t pos, size_t cap
                 if (cand >= indent) { /* a stop byte cannot precede the first non-space */
                     stop = cand;
                     stop_set = 1;
+                    /* the value-side stop (TODO.max-perf/03): the next
+                     * stop byte in the same chunk, over the same load */
+                    uint64_t bit = (uint64_t)1 << ((cand - i) * 8);
+                    uint64_t rest = stm & ~(bit | (bit - 1));
+                    if (rest) {
+                        stop2 = i + (size_t)(yep_ctz64(rest) >> 3);
+                        stop2_set = 1;
+                    }
                 }
+            }
+        } else if (have_indent && stop_set && !stop2_set) {
+            uint64_t stm = (yep_swar_eq8(x, k_co) | yep_swar_eq8(x, k_ha)) & room;
+            if (stm) {
+                stop2 = i + (size_t)(yep_ctz64(stm) >> 3);
+                stop2_set = 1;
             }
         }
         if (br) {
@@ -253,10 +270,15 @@ int yep_text_line_facts_capped(const char* s, size_t len, size_t pos, size_t cap
     if (!stop_set) {
         stop = end;
     }
+    if (!stop2_set) {
+        stop2 = end;
+    }
     out->end = (uint32_t)(pos + end);
     out->indent = (uint32_t)(pos + indent);
     out->stop = (uint32_t)(pos + stop);
     out->stop_set = stop_set;
+    out->stop2 = (uint32_t)(pos + stop2);
+    out->flags = (uint32_t)((stop2_set ? YEP_FACTS_STOP2 : 0) | (has_high ? YEP_FACTS_HIGH : 0));
     return 1;
 }
 

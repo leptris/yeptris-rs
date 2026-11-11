@@ -458,6 +458,11 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
     int norm_kept_raw = 0; /* raw NEL/LS/PS survived the quote-aware
                             * walk: the engine route owns the document
                             * (the tape runner predates the cut) */
+    char* nbuf = NULL;     /* the engine's break-normalizer copy (#953):
+                            * DOM and tape scalar slices point INTO it,
+                            * so the document must own it like the
+                            * finish pool and transcoded */
+    size_t nblen = 0;
 
     if (parse_frontend(buf, len, sys, json_mode, &data, &data_len, &transcoded, &transcoded_len,
                        &norm_kept_raw, &st) != 0) {
@@ -600,8 +605,11 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
     }
     /* Resolved tags, folded and escaped scalars live in the engine's
      * finish pool; the document must own it or every such string would
-     * dangle at engine teardown (found by ASAN). */
+     * dangle at engine teardown (found by ASAN). The break-normalizer
+     * copy is the same law (#953): scalar value slices in the DOM and
+     * the packed tape point INTO it. */
     yep_pool* finish = yep_engine_detach_pool(eng);
+    nbuf = yep_engine_detach_norm_buf(eng, &nblen);
     yep_engine_destroy(eng);
 
     /* Empty stream (no documents): NULL document with YEPTRIS_OK. */
@@ -613,6 +621,9 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
         }
         yep_pool_destroy(finish);
         yep_free(sys, transcoded);
+        if (nbuf != NULL) {
+            yep_free(sys, nbuf); /* not parked: no document survives */
+        }
         if (status != NULL) {
             *status = YEPTRIS_OK;
         }
@@ -631,6 +642,9 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
         yep_dom_destroy(dom);
         yep_pool_destroy(finish);
         yep_free(sys, transcoded);
+        if (nbuf != NULL) {
+            yep_free(sys, nbuf); /* not parked: no document survives */
+        }
         st = YEPTRIS_ERROR_MEMORY;
         goto fail;
     }
@@ -640,6 +654,31 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
                                                                            : YEPTRIS_SCHEMA_12_CORE;
     doc->transcoded = transcoded;
     doc->transcoded_len = transcoded_len;
+    if (nbuf != NULL) {
+        /* #953: the engine re-normalized THIS run (raw NEL/LS/PS rode
+         * quoted regions past the front-end), so every engine event
+         * view points INTO nbuf — and the lazy tape stored those
+         * pointers ABSOLUTE (they fall outside yt.input's range, so
+         * the span recorder kept them verbatim). The document owns
+         * nbuf like the finish pool, whichever copy the slot held. */
+        if (have_tape) {
+            /* rebase the tape's span base onto the doc-owned copy:
+             * materialization's input_base offsets against LIVE bytes.
+             * `transcoded` is referenced by no record (the engine
+             * parsed nbuf only) — release it. */
+            yt.input = nbuf;
+            yt.input_len = nblen;
+            yep_free(sys, transcoded);
+            transcoded = NULL;
+            doc->transcoded = (unsigned char*)nbuf;
+            doc->transcoded_len = nblen;
+        } else {
+            /* eager: the dom copied every scalar during the run (the
+             * borrowed views offset against input_base = transcoded);
+             * nbuf has no post-run reader — the slot keeps transcoded */
+            yep_free(sys, nbuf);
+        }
+    }
     doc->input = buf;
     doc->finish_pool = finish; /* NULL on the eager route */
     doc->lazy_tape = NULL;
@@ -650,6 +689,9 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
             ytap_free(&yt);
             yep_pool_destroy(finish);
             yep_free(sys, transcoded);
+            if (nbuf != NULL) {
+                yep_free(sys, nbuf); /* not parked: no document survives */
+            }
             yep_free(sys, doc);
             st = YEPTRIS_ERROR_MEMORY;
             goto fail;
