@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- The vendored engine snapshot rides v0.6.62 by @[object]
+
+### Other
+
 - Release v0.6.60 by @[object]
 
 ### Added
