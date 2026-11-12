@@ -21,10 +21,14 @@ try {
   await page.goto(url);
   const result = await page.evaluate(async () => {
     const module = await import('/yeptris_wasm_smoke.js');
-    await module.default();
-    return module.smoke();
+    const wasm = await module.default();
+    const before = wasm.memory.buffer.byteLength;
+    const status = module.smoke();
+    return { status, before, after: wasm.memory.buffer.byteLength };
   });
-  assert.equal(result, 'ok');
+  assert.equal(result.status, 'ok');
+  assert(result.after > result.before, 'stress consumer must grow WebAssembly memory');
+  console.log(`memory grew from ${result.before} to ${result.after} bytes`);
   console.log(`Chromium ${browser.version()}: vendored parse/emit/allocation/error smoke passed`);
 } finally {
   await browser?.close();

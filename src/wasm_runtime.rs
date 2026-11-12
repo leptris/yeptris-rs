@@ -136,6 +136,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_runtime_has_no_host_environment_or_descriptors() {
+        unsafe {
+            assert!(getenv(b"LANG\0".as_ptr()).is_null());
+            let mut written = 123;
+            assert_eq!(__wasi_fd_write(1, ptr::null(), 0, &mut written), BADF);
+            assert_eq!(written, 0);
+            let mut offset = 123;
+            assert_eq!(__wasi_fd_seek(0, 0, 0, &mut offset), BADF);
+            assert_eq!(offset, 0);
+            assert_eq!(__wasi_fd_close(0), BADF);
+            let p = emscripten_builtin_malloc(1024);
+            assert!(!p.is_null());
+            let input = vec![42_u8; 1024];
+            emscripten_memcpy_js(p, input.as_ptr(), input.len());
+            assert_eq!(std::slice::from_raw_parts(p, input.len()), input.as_slice());
+            free(p);
+        }
+    }
+
+    #[test]
     fn c_allocation_contract() {
         unsafe {
             assert!(calloc(usize::MAX, 2).is_null());

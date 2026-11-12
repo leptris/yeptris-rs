@@ -175,6 +175,9 @@ fn build_vendored() {
     if arch == "aarch64" {
         sources.push(PathBuf::from("yeptris/common/simd_text_neon.c"));
     }
+    if browser_target() {
+        validate_browser_toolchain();
+    }
     let mut build = base_build(&snap, &generated, msvc);
     for f in &sources {
         build.file(snap.join("src").join(f));
@@ -266,6 +269,26 @@ fn browser_target() -> bool {
 fn browser_compiler() -> std::ffi::OsString {
     println!("cargo:rerun-if-env-changed=YEPTRIS_EMCC");
     env::var_os("YEPTRIS_EMCC").unwrap_or_else(|| "emcc".into())
+}
+
+#[cfg(feature = "vendored")]
+fn validate_browser_toolchain() {
+    let output = std::process::Command::new(browser_compiler())
+        .arg("--version")
+        .output()
+        .expect("browser vendored builds require Emscripten SDK 3.1.50: activate it so emcc is on PATH, or set YEPTRIS_EMCC");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.lines().next().and_then(|line| {
+        line.split_whitespace()
+            .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))
+    });
+    assert!(
+        output.status.success() && version == Some("3.1.50"),
+        "browser C runtime integration requires Emscripten SDK 3.1.50; compiler reported: {}",
+        text.lines().next().unwrap_or("<no version>")
+    );
+    println!("cargo:rerun-if-env-changed=EM_CACHE");
+    println!("cargo:rerun-if-env-changed=EMSDK");
 }
 
 #[cfg(feature = "vendored")]

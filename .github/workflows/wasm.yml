@@ -10,6 +10,16 @@ concurrency:
   group: wasm-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  macos-vendored:
+    name: Vendored snapshot (macOS)
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - run: cargo test --locked --workspace --features vendored
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -28,7 +38,8 @@ jobs:
         run: embuilder build libc
       - name: Link Rust and vendored C into one browser module
         run: cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: cli-cache
         with:
           path: ${{ runner.temp }}/wasm-bindgen-cli
           key: wasm-bindgen-cli-0.2.105-${{ runner.os }}-rust-1.95.0
@@ -38,6 +49,11 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.105 --locked --root "$RUNNER_TEMP/wasm-bindgen-cli"
           fi
           echo "$RUNNER_TEMP/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache/save@v4
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/wasm-bindgen-cli
+          key: wasm-bindgen-cli-0.2.105-${{ runner.os }}-rust-1.95.0
       - name: Generate Node and browser glue
         run: |
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-node --target nodejs
