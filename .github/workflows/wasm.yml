@@ -1,0 +1,43 @@
+name: Rust browser vendored YAML
+on:
+  pull_request:
+  push:
+    branches: [feat/wasm-bindgen-vendored, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: wasm32-unknown-unknown
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.50
+      - name: Prepare scalar single-thread C runtime
+        run: embuilder build libc
+      - name: Install matching wasm-bindgen tooling
+        run: cargo install wasm-bindgen-cli --version 0.2.105 --locked
+      - name: Link Rust and vendored C into one browser module
+        run: |
+          cargo build --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
+          wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-node --target nodejs
+          wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-web --target web
+      - name: Execute Node consumer
+        run: node -e 'const m = require("./wasm-node/yeptris_wasm_smoke.js"); if (m.smoke() !== "ok") process.exit(1);'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-artifacts
+          path: |
+            wasm-node
+            wasm-web
+            tests/wasm-smoke/Cargo.lock

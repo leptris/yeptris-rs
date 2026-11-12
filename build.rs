@@ -184,6 +184,10 @@ fn build_vendored() {
     // the defining archive has to be scanned after the referencing one.
     build.compile("yeptris");
 
+    if browser_target() {
+        link_browser_runtime();
+    }
+
     // x86: the AVX2 TU needs arch flags outside the baseline; cc has
     // no per-file flags, so it is a second archive. The runtime
     // dispatch (simd_text.c) selects it only when the host really has
@@ -213,6 +217,11 @@ fn build_vendored() {
 #[cfg(feature = "vendored")]
 fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
     let mut build = cc::Build::new();
+    if browser_target() {
+        // Emscripten supplies the C headers and scalar, single-thread libc.
+        // Rust/wasm-bindgen still owns the final module and its linear memory.
+        build.compiler(browser_compiler());
+    }
     build
         .include(generated)
         .include(snap.join("src/include"))
@@ -238,6 +247,45 @@ fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
             .flag("-fvisibility=hidden");
     }
     build
+}
+
+/// This integration deliberately supports single-thread browser modules only.
+#[cfg(feature = "vendored")]
+fn browser_target() -> bool {
+    env::var("TARGET").as_deref() == Ok("wasm32-unknown-unknown")
+}
+
+#[cfg(feature = "vendored")]
+fn browser_compiler() -> std::ffi::OsString {
+    println!("cargo:rerun-if-env-changed=YEPTRIS_EMCC");
+    env::var_os("YEPTRIS_EMCC").unwrap_or_else(|| "emcc".into())
+}
+
+#[cfg(feature = "vendored")]
+fn link_browser_runtime() {
+    use std::process::Command;
+    let output = Command::new(browser_compiler())
+        .arg("--print-file-name=libc.a")
+        .output()
+        .expect("browser vendored builds require emcc from Emscripten SDK 3.1.50 on PATH (or YEPTRIS_EMCC)");
+    assert!(
+        output.status.success(),
+        "emcc failed to locate its libc archive"
+    );
+    let archive = PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("emcc archive path is UTF-8")
+            .trim(),
+    );
+    assert!(
+        archive.is_absolute() && archive.is_file(),
+        "Emscripten libc archive missing; run `embuilder build libc` with SDK 3.1.50 first"
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        archive.parent().unwrap().display()
+    );
+    println!("cargo:rustc-link-lib=static=c");
 }
 
 /// Per-file `rerun-if-changed` over the snapshot — the whole tree is

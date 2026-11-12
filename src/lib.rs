@@ -16,6 +16,9 @@
 
 mod ffi;
 
+#[cfg(all(feature = "vendored", target_arch = "wasm32", target_os = "unknown"))]
+mod wasm_runtime;
+
 #[cfg(feature = "serde")]
 mod de;
 #[cfg(feature = "serde")]
