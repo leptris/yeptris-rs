@@ -31,8 +31,16 @@ jobs:
           cargo build --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-node --target nodejs
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-web --target web
+      - name: Audit final module imports
+        run: node tests/wasm-smoke/audit-imports.cjs
       - name: Execute Node consumer
         run: node -e 'const m = require("./wasm-node/yeptris_wasm_smoke.js"); if (m.smoke() !== "ok") process.exit(1);'
+      - name: Install browser consumer tools
+        run: |
+          npm install --prefix tests/wasm-smoke --ignore-scripts --no-audit --no-fund
+          tests/wasm-smoke/node_modules/.bin/playwright install chromium
+      - name: Execute actual browser consumer
+        run: node tests/wasm-smoke/browser.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -29,12 +29,12 @@ unsafe fn allocate(size: usize, zero: bool) -> *mut u8 {
     base.add(HEADER)
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     allocate(size, false)
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
 pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     match count.checked_mul(size) {
         Some(size) => allocate(size, true),
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     }
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
 pub unsafe extern "C" fn free(p: *mut u8) {
     if !p.is_null() {
         let base = p.sub(HEADER);
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn free(p: *mut u8) {
     }
 }
 
-#[export_name = "realloc"]
+#[cfg_attr(target_arch = "wasm32", export_name = "realloc")]
 pub unsafe extern "C" fn realloc_c(p: *mut u8, size: usize) -> *mut u8 {
     if p.is_null() {
         return malloc(size);
@@ -72,4 +72,43 @@ pub unsafe extern "C" fn realloc_c(p: *mut u8, size: usize) -> *mut u8 {
     }
     grown.cast::<usize>().write(new.size());
     grown.add(HEADER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_allocation_contract() {
+        unsafe {
+            assert!(calloc(usize::MAX, 2).is_null());
+            assert!(malloc(usize::MAX).is_null());
+            free(ptr::null_mut());
+            let p = calloc(33, 3);
+            assert!(!p.is_null());
+            assert_eq!(p as usize % ALIGN, 0);
+            assert!(std::slice::from_raw_parts(p, 99).iter().all(|b| *b == 0));
+            for i in 0..99 {
+                p.add(i).write(i as u8);
+            }
+            assert!(realloc_c(p, usize::MAX).is_null());
+            for i in 0..99 {
+                assert_eq!(p.add(i).read(), i as u8);
+            }
+            let p = realloc_c(p, 32768);
+            assert!(!p.is_null());
+            for i in 0..99 {
+                assert_eq!(p.add(i).read(), i as u8);
+            }
+            let p = realloc_c(p, 33);
+            assert!(!p.is_null());
+            for i in 0..33 {
+                assert_eq!(p.add(i).read(), i as u8);
+            }
+            assert!(realloc_c(p, 0).is_null());
+            let p = realloc_c(ptr::null_mut(), 0);
+            assert!(!p.is_null());
+            free(p);
+        }
+    }
 }

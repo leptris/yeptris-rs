@@ -16,7 +16,10 @@
 
 mod ffi;
 
-#[cfg(all(feature = "vendored", target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(all(
+    feature = "vendored",
+    any(test, all(target_arch = "wasm32", target_os = "unknown"))
+))]
 mod wasm_runtime;
 
 #[cfg(feature = "serde")]
