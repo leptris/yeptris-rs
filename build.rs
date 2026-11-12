@@ -175,6 +175,9 @@ fn build_vendored() {
     if arch == "aarch64" {
         sources.push(PathBuf::from("yeptris/common/simd_text_neon.c"));
     }
+    if browser_target() {
+        validate_browser_toolchain();
+    }
     let mut build = base_build(&snap, &generated, msvc);
     for f in &sources {
         build.file(snap.join("src").join(f));
@@ -183,6 +186,10 @@ fn build_vendored() {
     // AVX2 kernel table, and static archives resolve left-to-right —
     // the defining archive has to be scanned after the referencing one.
     build.compile("yeptris");
+
+    if browser_target() {
+        link_browser_runtime();
+    }
 
     // x86: the AVX2 TU needs arch flags outside the baseline; cc has
     // no per-file flags, so it is a second archive. The runtime
@@ -213,6 +220,19 @@ fn build_vendored() {
 #[cfg(feature = "vendored")]
 fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
     let mut build = cc::Build::new();
+    if browser_target() {
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        assert!(
+            !features.split(',').any(|f| f == "atomics"),
+            "vendored browser builds currently require single-thread WebAssembly without atomics"
+        );
+        assert!(features.split(',').any(|f| f == "bulk-memory"), "vendored browser builds require Rust's bulk-memory target feature for in-module memory copies");
+        // Emscripten supplies the C headers and scalar, single-thread libc.
+        // Rust/wasm-bindgen still owns the final module and its linear memory.
+        build
+            .compiler(browser_compiler())
+            .target("wasm32-unknown-emscripten");
+    }
     build
         .include(generated)
         .include(snap.join("src/include"))
@@ -238,6 +258,66 @@ fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
             .flag("-fvisibility=hidden");
     }
     build
+}
+
+/// This integration deliberately supports single-thread browser modules only.
+#[cfg(feature = "vendored")]
+fn browser_target() -> bool {
+    env::var("TARGET").as_deref() == Ok("wasm32-unknown-unknown")
+}
+
+#[cfg(feature = "vendored")]
+fn browser_compiler() -> std::ffi::OsString {
+    println!("cargo:rerun-if-env-changed=YEPTRIS_EMCC");
+    env::var_os("YEPTRIS_EMCC").unwrap_or_else(|| "emcc".into())
+}
+
+#[cfg(feature = "vendored")]
+fn validate_browser_toolchain() {
+    let output = std::process::Command::new(browser_compiler())
+        .arg("--version")
+        .output()
+        .expect("browser vendored builds require Emscripten SDK 3.1.50: activate it so emcc is on PATH, or set YEPTRIS_EMCC");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.lines().next().and_then(|line| {
+        line.split_whitespace()
+            .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))
+    });
+    assert!(
+        output.status.success() && version == Some("3.1.50"),
+        "browser C runtime integration requires Emscripten SDK 3.1.50; compiler reported: {}",
+        text.lines().next().unwrap_or("<no version>")
+    );
+    println!("cargo:rerun-if-env-changed=EM_CACHE");
+    println!("cargo:rerun-if-env-changed=EMSDK");
+}
+
+#[cfg(feature = "vendored")]
+fn link_browser_runtime() {
+    use std::process::Command;
+    let output = Command::new(browser_compiler())
+        .arg("--print-file-name=libc.a")
+        .output()
+        .expect("browser vendored builds require emcc from Emscripten SDK 3.1.50 on PATH (or YEPTRIS_EMCC)");
+    assert!(
+        output.status.success(),
+        "emcc failed to locate its libc archive"
+    );
+    let archive = PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("emcc archive path is UTF-8")
+            .trim(),
+    );
+    assert!(
+        archive.is_absolute() && archive.is_file(),
+        "Emscripten libc archive missing; run `embuilder build libc` with SDK 3.1.50 first"
+    );
+    println!("cargo:rerun-if-changed={}", archive.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        archive.parent().unwrap().display()
+    );
+    println!("cargo:rustc-link-lib=static=c");
 }
 
 /// Per-file `rerun-if-changed` over the snapshot — the whole tree is

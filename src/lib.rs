@@ -19,6 +19,12 @@ mod ffi;
 mod emit_options;
 pub use emit_options::{EmitOptions, LineWidth};
 
+#[cfg(all(
+    feature = "vendored",
+    any(test, all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod wasm_runtime;
+
 #[cfg(feature = "serde")]
 mod de;
 #[cfg(feature = "serde")]
