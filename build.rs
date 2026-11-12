@@ -226,6 +226,7 @@ fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
             !features.split(',').any(|f| f == "atomics"),
             "vendored browser builds currently require single-thread WebAssembly without atomics"
         );
+        assert!(features.split(',').any(|f| f == "bulk-memory"), "vendored browser builds require Rust's bulk-memory target feature for in-module memory copies");
         // Emscripten supplies the C headers and scalar, single-thread libc.
         // Rust/wasm-bindgen still owns the final module and its linear memory.
         build
@@ -311,6 +312,7 @@ fn link_browser_runtime() {
         archive.is_absolute() && archive.is_file(),
         "Emscripten libc archive missing; run `embuilder build libc` with SDK 3.1.50 first"
     );
+    println!("cargo:rerun-if-changed={}", archive.display());
     println!(
         "cargo:rustc-link-search=native={}",
         archive.parent().unwrap().display()

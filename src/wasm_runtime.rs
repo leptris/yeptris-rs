@@ -85,7 +85,7 @@ pub unsafe extern "C" fn emscripten_builtin_malloc(size: usize) -> *mut u8 {
 pub unsafe extern "C" fn emscripten_memcpy_js(dst: *mut u8, src: *const u8, len: usize) {
     // Rust's wasm target enables bulk-memory; this lowers to memory.copy rather
     // than recursively entering Emscripten's large-copy JavaScript fallback.
-    ptr::copy_nonoverlapping(src, dst, len);
+    ptr::copy(src, dst, len);
 }
 
 #[cfg_attr(target_arch = "wasm32", no_mangle)]
@@ -152,6 +152,11 @@ mod tests {
             emscripten_memcpy_js(p, input.as_ptr(), input.len());
             assert_eq!(std::slice::from_raw_parts(p, input.len()), input.as_slice());
             free(p);
+            let mut overlap = [1_u8; 1025];
+            overlap[0] = 42;
+            emscripten_memcpy_js(overlap.as_mut_ptr().add(1), overlap.as_ptr(), 1024);
+            assert_eq!(overlap[1], 42);
+            assert!(overlap[2..].iter().all(|b| *b == 1));
         }
     }
 

@@ -12,7 +12,7 @@ concurrency:
 jobs:
   macos-vendored:
     name: Vendored snapshot (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +36,20 @@ jobs:
           version: 3.1.50
       - name: Prepare scalar single-thread C runtime
         run: embuilder build libc
-      - name: Link Rust and vendored C into one browser module
-        run: cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
+      - name: Record pinned build inputs
+        run: |
+          {
+            git rev-parse HEAD
+            rustc --version --verbose
+            emcc --version
+            cat vendor/yeptris/ENGINE_REF
+            sha256sum Cargo.lock tests/wasm-smoke/Cargo.lock vendor/yeptris/ENGINE_REF "$(emcc --print-file-name=libc.a)"
+          } > build-inputs.txt
+          cat build-inputs.txt
+      - name: Link Rust and vendored C in both profiles
+        run: |
+          cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
+          cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown
       - uses: actions/cache/restore@v4
         id: cli-cache
         with:
@@ -58,10 +70,13 @@ jobs:
         run: |
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-node --target nodejs
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-web --target web
+          wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/debug/yeptris_wasm_smoke.wasm --out-dir wasm-debug --target nodejs
       - name: Audit final module imports
         run: node tests/wasm-smoke/audit-imports.cjs
-      - name: Execute Node consumer
-        run: node -e 'const m = require("./wasm-node/yeptris_wasm_smoke.js"); if (m.smoke() !== "ok") process.exit(1);'
+      - name: Execute debug and release Node consumers
+        run: |
+          node -e 'for (const dir of ["wasm-debug", "wasm-node"]) { const m = require(`./${dir}/yeptris_wasm_smoke.js`); if (m.smoke() !== "ok") process.exit(1); console.log(dir + ": smoke passed"); }'
+
       - name: Install browser consumer tools
         run: |
           npm ci --prefix tests/wasm-smoke --ignore-scripts --no-audit --no-fund
@@ -75,4 +90,6 @@ jobs:
           path: |
             wasm-node
             wasm-web
+            wasm-debug
+            build-inputs.txt
             tests/wasm-smoke/Cargo.lock

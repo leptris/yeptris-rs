@@ -196,6 +196,10 @@ for C `realloc` and `free`. There is no separate C `sbrk` heap sharing the
 same linear memory. These C allocation symbols are supplied by this
 crate on this target; do not link another competing implementation.
 
+Rust 1.95.0 and its default bulk-memory WebAssembly feature are used in
+CI. Disabling bulk-memory is rejected because the in-module copy adapter
+must lower to WebAssembly memory.copy.
+
 This build is deliberately single-threaded. Emscripten's single-thread
 libc supplies mutex stubs; error state is local to each WebAssembly
 instance. Atomics-enabled builds are rejected rather than silently

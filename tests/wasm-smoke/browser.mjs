@@ -24,11 +24,14 @@ try {
     const wasm = await module.default();
     const before = wasm.memory.buffer.byteLength;
     const status = module.smoke();
-    return { status, before, after: wasm.memory.buffer.byteLength };
+    const after = wasm.memory.buffer.byteLength;
+    const repeated = module.smoke();
+    return { status, repeated, before, after, afterRepeat: wasm.memory.buffer.byteLength };
   });
   assert.equal(result.status, 'ok');
+  assert.equal(result.repeated, 'ok');
   assert(result.after > result.before, 'stress consumer must grow WebAssembly memory');
-  console.log(`memory grew from ${result.before} to ${result.after} bytes`);
+  console.log(`memory grew from ${result.before} to ${result.after} bytes; repeated consumer: ${result.afterRepeat} bytes`);
   console.log(`Chromium ${browser.version()}: vendored parse/emit/allocation/error smoke passed`);
 } finally {
   await browser?.close();

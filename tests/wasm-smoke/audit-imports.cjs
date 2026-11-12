@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
-for (const target of ['node', 'web']) {
+for (const target of ['node', 'web', 'debug']) {
   const path = `wasm-${target}/yeptris_wasm_smoke_bg.wasm`;
   const imports = WebAssembly.Module.imports(new WebAssembly.Module(fs.readFileSync(path)));
   console.log(path, JSON.stringify(imports));
