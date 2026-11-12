@@ -29,12 +29,12 @@ unsafe fn allocate(size: usize, zero: bool) -> *mut u8 {
     base.add(HEADER)
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     allocate(size, false)
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     match count.checked_mul(size) {
         Some(size) => allocate(size, true),
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn free(p: *mut u8) {
     if !p.is_null() {
         let base = p.sub(HEADER);
@@ -51,7 +51,10 @@ pub unsafe extern "C" fn free(p: *mut u8) {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", export_name = "realloc")]
+#[cfg_attr(
+    all(target_arch = "wasm32", target_os = "unknown"),
+    export_name = "realloc"
+)]
 pub unsafe extern "C" fn realloc_c(p: *mut u8, size: usize) -> *mut u8 {
     if p.is_null() {
         return malloc(size);
@@ -76,19 +79,19 @@ pub unsafe extern "C" fn realloc_c(p: *mut u8, size: usize) -> *mut u8 {
 
 // These are the only host hooks retained by the pinned single-thread libc.
 // Keep them inside the module: consumers do not need an Emscripten/WASI host.
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn emscripten_builtin_malloc(size: usize) -> *mut u8 {
     malloc(size)
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn emscripten_memcpy_js(dst: *mut u8, src: *const u8, len: usize) {
     // Rust's wasm target enables bulk-memory; this lowers to memory.copy rather
     // than recursively entering Emscripten's large-copy JavaScript fallback.
     ptr::copy(src, dst, len);
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub extern "C" fn getenv(_name: *const u8) -> *mut u8 {
     // Browser instances have no process environment. In particular libc must
     // not discover host locale settings or allocate an environment from JS.
@@ -100,12 +103,12 @@ pub extern "C" fn getenv(_name: *const u8) -> *mut u8 {
 // not fabricate successful output or add filesystem capabilities to browsers.
 const BADF: u16 = 8; // Emscripten 3.1.50 wasi/api.h: __WASI_ERRNO_BADF.
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub extern "C" fn __wasi_fd_close(_fd: u32) -> u16 {
     BADF
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn __wasi_fd_write(
     _fd: u32,
     _iovs: *const u8,
@@ -118,7 +121,7 @@ pub unsafe extern "C" fn __wasi_fd_write(
     BADF
 }
 
-#[cfg_attr(target_arch = "wasm32", no_mangle)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), no_mangle)]
 pub unsafe extern "C" fn __wasi_fd_seek(
     _fd: u32,
     _offset: i64,
