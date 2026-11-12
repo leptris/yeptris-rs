@@ -78,3 +78,15 @@ jobs:
         run: cargo build --workspace --features vendored --verbose
       - name: cargo test --features vendored
         run: cargo test --workspace --features vendored --verbose
+
+  # The oldest Rust the crate supports downstream (ukiryu-rs pins
+  # rust-version 1.86). Vendored, so no engine checkout is needed;
+  # library and tests build and pass on exactly this toolchain.
+  msrv:
+    name: cargo test --features vendored (Rust 1.86)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86
+      - name: cargo test --features vendored
+        run: cargo test --workspace --features vendored --locked --verbose
