@@ -27,6 +27,24 @@ pub struct YeptrisPlanStr {
     pub len: usize,
 }
 
+/* yeptris_emit_options (emit.h): size-versioned — the engine reads
+ * each field only when `size` covers it, so `size` is always the
+ * full sizeof of THIS mirror (every field declared present). Field
+ * order and widths mirror the header exactly; tests/abi.rs pins the
+ * 24-byte layout. */
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct YeptrisEmitOptions {
+    pub size: u32,
+    pub canonical: c_int,
+    pub best_width: c_int,
+    pub explicit_doc_start: c_int,
+    pub best_indent: c_int,
+    pub block_fold: c_int,
+}
+
+const _: () = assert!(std::mem::size_of::<YeptrisEmitOptions>() == 24);
+
 /* YeptrisStatus (error.h) */
 pub type YeptrisStatus = c_int;
 pub const YEPTRIS_OK: YeptrisStatus = 0;
@@ -201,6 +219,11 @@ extern "C" {
 
     /* emit.h */
     pub fn yeptris_serialize(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
+    pub fn yeptris_serialize_ex(
+        doc: YeptrisDocument,
+        opts: *const YeptrisEmitOptions,
+        len: *mut usize,
+    ) -> *mut c_char;
     pub fn yeptris_serialize_into(doc: YeptrisDocument, buf: *mut c_char, cap: usize) -> usize;
 
     /* parse.h — the tolerant per-document stream iterator (#921). The

@@ -177,10 +177,16 @@ impl Hasher for FxHasher {
         self.hash
     }
     fn write(&mut self, bytes: &[u8]) {
-        let (chunks, tail) = bytes.as_chunks::<8>();
-        for c in chunks {
-            self.add(u64::from_le_bytes(*c));
+        // chunks_exact + remainder: the same little-endian 8-byte words
+        // and zero-padded tail as `as_chunks::<8>()`, which is only
+        // stable from Rust 1.88 (the crate builds on 1.86)
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(
+                c.try_into().expect("chunks_exact yields 8-byte chunks"),
+            ));
         }
+        let tail = chunks.remainder();
         if !tail.is_empty() {
             // zero-padded tail: distinct byte strings still end up
             // distinct u64s unless one is a zero-extension of the
