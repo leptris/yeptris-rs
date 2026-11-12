@@ -74,6 +74,63 @@ pub unsafe extern "C" fn realloc_c(p: *mut u8, size: usize) -> *mut u8 {
     grown.add(HEADER)
 }
 
+// These are the only host hooks retained by the pinned single-thread libc.
+// Keep them inside the module: consumers do not need an Emscripten/WASI host.
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub unsafe extern "C" fn emscripten_builtin_malloc(size: usize) -> *mut u8 {
+    malloc(size)
+}
+
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub unsafe extern "C" fn emscripten_memcpy_js(dst: *mut u8, src: *const u8, len: usize) {
+    // Rust's wasm target enables bulk-memory; this lowers to memory.copy rather
+    // than recursively entering Emscripten's large-copy JavaScript fallback.
+    ptr::copy_nonoverlapping(src, dst, len);
+}
+
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub extern "C" fn getenv(_name: *const u8) -> *mut u8 {
+    // Browser instances have no process environment. In particular libc must
+    // not discover host locale settings or allocate an environment from JS.
+    ptr::null_mut()
+}
+
+// The C engine exposes memory-based APIs only. Musl's generic printf backend
+// retains descriptor helpers even for snprintf. Reject every descriptor: do
+// not fabricate successful output or add filesystem capabilities to browsers.
+const BADF: u16 = 8; // Emscripten 3.1.50 wasi/api.h: __WASI_ERRNO_BADF.
+
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub extern "C" fn __wasi_fd_close(_fd: u32) -> u16 {
+    BADF
+}
+
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub unsafe extern "C" fn __wasi_fd_write(
+    _fd: u32,
+    _iovs: *const u8,
+    _iovs_len: usize,
+    written: *mut usize,
+) -> u16 {
+    if !written.is_null() {
+        written.write(0);
+    }
+    BADF
+}
+
+#[cfg_attr(target_arch = "wasm32", no_mangle)]
+pub unsafe extern "C" fn __wasi_fd_seek(
+    _fd: u32,
+    _offset: i64,
+    _whence: u8,
+    new_offset: *mut u64,
+) -> u16 {
+    if !new_offset.is_null() {
+        new_offset.write(0);
+    }
+    BADF
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

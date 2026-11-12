@@ -177,3 +177,39 @@ The crate versions in lockstep with the engine's minor lines (the
 yeptris-ruby model): 0.6.0 is the first engine-0.6-ABI-tagged cut
 (engine v0.6.30); the binding's major.minor tracks the engine ABI it
 binds, and the patch tracks the binding itself.
+
+== Rust / wasm-bindgen browser builds
+
+The `vendored` feature also supports the Rust target
+`wasm32-unknown-unknown`. This path needs Emscripten SDK 3.1.50 on the
+build host: activate that SDK, then run `embuilder build libc` once to
+prepare its single-thread static C runtime. `emcc` must be on `PATH`, or
+set `YEPTRIS_EMCC` to its executable path. Cargo never downloads the SDK
+or an engine snapshot. The checked-in `ENGINE_REF` remains the engine
+identity for browser and native builds alike.
+
+Only C compilation uses the Emscripten target and headers. Rust still
+links the final `wasm32-unknown-unknown` module for wasm-bindgen; this does
+not create a second Emscripten JavaScript module. All C allocations use
+the Rust allocator, with allocation layouts stored in private headers
+for C `realloc` and `free`. There is no separate C `sbrk` heap sharing the
+same linear memory. These C allocation symbols are supplied by this
+crate on this target; do not link another competing implementation.
+
+This build is deliberately single-threaded. Emscripten's single-thread
+libc supplies mutex stubs; error state is local to each WebAssembly
+instance. Atomics-enabled builds are rejected rather than silently
+using those stubs in a shared-memory module. Separate WebAssembly
+instances in workers may be used; shared-memory/thread support is not
+provided by this configuration. YAML parsing/emitting does not require
+filesystem, process or WASI host adapters. The in-module libc adapter
+uses an empty process environment and returns `BADF` for every file
+descriptor operation; it never reports successful discarded output.
+C string formatting still uses libc's memory-backed writer.
+
+`tests/wasm-smoke` is a private wasm-bindgen consumer. The browser CI
+links its release artifact, audits the final imports, and executes
+parse/emit, invalid-input and allocation stress in Node and Chromium.
+The runtime/toolchain pins and consumer lockfile live with that test.
+The SDK's static libc is part of the final artifact, so distributors
+must preserve its applicable upstream licenses as well as Yeptris's.

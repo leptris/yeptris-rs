@@ -2,7 +2,7 @@ name: Rust browser vendored YAML
 on:
   pull_request:
   push:
-    branches: [feat/wasm-bindgen-vendored, main]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,6 +13,8 @@ jobs:
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/yeptris-playwright
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,11 +26,20 @@ jobs:
           version: 3.1.50
       - name: Prepare scalar single-thread C runtime
         run: embuilder build libc
-      - name: Install matching wasm-bindgen tooling
-        run: cargo install wasm-bindgen-cli --version 0.2.105 --locked
       - name: Link Rust and vendored C into one browser module
+        run: cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wasm-bindgen-cli
+          key: wasm-bindgen-cli-0.2.105-${{ runner.os }}-rust-1.95.0
+      - name: Install matching wasm-bindgen tooling in this job's temporary directory
         run: |
-          cargo build --locked --manifest-path tests/wasm-smoke/Cargo.toml --target wasm32-unknown-unknown --release
+          if ! test -x "$RUNNER_TEMP/wasm-bindgen-cli/bin/wasm-bindgen"; then
+            cargo install wasm-bindgen-cli --version 0.2.105 --locked --root "$RUNNER_TEMP/wasm-bindgen-cli"
+          fi
+          echo "$RUNNER_TEMP/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - name: Generate Node and browser glue
+        run: |
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-node --target nodejs
           wasm-bindgen tests/wasm-smoke/target/wasm32-unknown-unknown/release/yeptris_wasm_smoke.wasm --out-dir wasm-web --target web
       - name: Audit final module imports
@@ -37,7 +48,7 @@ jobs:
         run: node -e 'const m = require("./wasm-node/yeptris_wasm_smoke.js"); if (m.smoke() !== "ok") process.exit(1);'
       - name: Install browser consumer tools
         run: |
-          npm install --prefix tests/wasm-smoke --ignore-scripts --no-audit --no-fund
+          npm ci --prefix tests/wasm-smoke --ignore-scripts --no-audit --no-fund
           tests/wasm-smoke/node_modules/.bin/playwright install chromium
       - name: Execute actual browser consumer
         run: node tests/wasm-smoke/browser.mjs

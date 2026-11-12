@@ -218,6 +218,11 @@ fn build_vendored() {
 fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
     let mut build = cc::Build::new();
     if browser_target() {
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        assert!(
+            !features.split(',').any(|f| f == "atomics"),
+            "vendored browser builds currently require single-thread WebAssembly without atomics"
+        );
         // Emscripten supplies the C headers and scalar, single-thread libc.
         // Rust/wasm-bindgen still owns the final module and its linear memory.
         build
