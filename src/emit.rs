@@ -43,7 +43,7 @@ pub fn to_string(value: &Value) -> Result<String> {
 /// shape; only the emitter's knobs differ. Invalid settings fail with
 /// [`ErrorKind::Arg`] before anything is built.
 pub fn to_string_with(value: &Value, options: &EmitOptions) -> Result<String> {
-    options.to_ffi()?;
+    options.ffi()?;
     let doc = build_document(value)?;
     let s = doc.serialize_string_with(options)?;
     Ok(s.strip_suffix('\n').unwrap_or(&s).to_owned())
@@ -178,7 +178,7 @@ pub(crate) fn float_text(x: f64) -> String {
     if (-3..=16).contains(&k) {
         if k <= 0 {
             out.push_str("0.");
-            out.extend(std::iter::repeat('0').take((-k) as usize));
+            out.extend(std::iter::repeat_n('0', (-k) as usize));
             out.push_str(&digits);
         } else if k < len {
             out.push_str(&digits[..k as usize]);
@@ -186,7 +186,7 @@ pub(crate) fn float_text(x: f64) -> String {
             out.push_str(&digits[k as usize..]);
         } else {
             out.push_str(&digits);
-            out.extend(std::iter::repeat('0').take((k - len) as usize));
+            out.extend(std::iter::repeat_n('0', (k - len) as usize));
             out.push_str(".0");
         }
         return out;

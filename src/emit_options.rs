@@ -122,7 +122,7 @@ impl EmitOptions {
 
     /// The C struct, every field declared present. Settings the
     /// engine would silently clamp are refused here instead.
-    pub(crate) fn to_ffi(&self) -> Result<ffi::YeptrisEmitOptions> {
+    pub(crate) fn ffi(&self) -> Result<ffi::YeptrisEmitOptions> {
         if !(2..=9).contains(&self.indent) {
             return Err(ErrorKind::Arg.into());
         }

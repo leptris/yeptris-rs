@@ -317,7 +317,7 @@ impl Document<'_> {
     /// NULL verdict maps to [`ErrorKind::NotRepresentable`] exactly as
     /// in [`Document::serialize`].
     pub fn serialize_with(&self, options: &EmitOptions) -> Result<Vec<u8>> {
-        let opts = options.to_ffi()?;
+        let opts = options.ffi()?;
         let mut len: usize = 0;
         let raw = unsafe { ffi::yeptris_serialize_ex(self.raw, &opts, &mut len) };
         if raw.is_null() {
