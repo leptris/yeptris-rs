@@ -57,6 +57,47 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
+  check-riscv64:
+    # riscv64gc-unknown-linux-gnu is rustc Tier 2 with std: the crates.io
+    # SOURCE distribution already covers the target with no packaging
+    # change (leptris/leptris-py#346 is the wheel-side twin; here the
+    # verdict is source, not prebuilt artifacts). The leg type-checks
+    # the workspace against the target so a cfg/arch regression
+    # surfaces in CI, not on a user's board. No QEMU: build.rs only
+    # locates the (host-built) libyeptris — no compilation, and cargo
+    # check never links.
+    name: cargo check riscv64gc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout engine repository
+        uses: actions/checkout@v4
+        with:
+          repository: leptris/yeptris
+          ref: main
+          path: engine
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+      - name: Build libyeptris shared library (host arch — the path is all build.rs needs)
+        shell: bash
+        run: |
+          cmake -B engine/build-shared -S engine \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYEPTRIS_BUILD_SHARED=ON -DYEPTRIS_BUILD_STATIC=OFF \
+            -DBUILD_TESTING=OFF -DYEPTRIS_BUILD_CLI=OFF \
+            -DYEPTRIS_BUILD_BENCHMARKS=OFF
+          cmake --build engine/build-shared --config Release
+          LIB=$(find engine/build-shared -type f -o -type l 2>/dev/null | grep -iE '(lib)?yeptris\.(dylib|so)$' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "ERROR: libyeptris shared library not found"
+            exit 1
+          fi
+          LIBDIR=$(cd "$(dirname "$LIB")" && pwd)
+          echo "YEPTRIS_LIB_PATH=$LIBDIR" >> "$GITHUB_ENV"
+      - name: cargo check (riscv64gc-unknown-linux-gnu)
+        run: cargo check --workspace --all-targets --target riscv64gc-unknown-linux-gnu --verbose
+
   # yeptris-rs#40: the vendored leg compiles the CHECKED-IN engine
   # snapshot (vendor/yeptris/) via cc — no engine checkout, no
   # YEPTRIS_LIB_PATH: exactly what a `cargo add yeptris --features
