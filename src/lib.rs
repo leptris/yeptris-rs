@@ -16,6 +16,9 @@
 
 mod ffi;
 
+mod emit_options;
+pub use emit_options::{EmitOptions, LineWidth};
+
 #[cfg(feature = "serde")]
 mod de;
 #[cfg(feature = "serde")]
@@ -39,7 +42,7 @@ use std::marker::PhantomData;
 #[cfg(feature = "serde")]
 pub use de::{from_slice, from_str, from_value, DeserError};
 #[cfg(feature = "serde")]
-pub use emit::to_string;
+pub use emit::{to_string, to_string_with};
 #[cfg(feature = "serde")]
 pub use ser::{to_value, ToValueError};
 #[cfg(feature = "serde")]
@@ -302,6 +305,32 @@ impl Document<'_> {
     /// Serialize to an owned UTF-8 string.
     pub fn serialize_string(&self) -> Result<String> {
         let bytes = self.serialize()?;
+        String::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Internal))
+    }
+
+    /// Serialize the whole stream with explicit emitter settings (the
+    /// engine's `yeptris_serialize_ex`). `EmitOptions::new()` writes
+    /// the same bytes as [`Document::serialize`].
+    ///
+    /// Settings outside the engine's accepted ranges fail with
+    /// [`ErrorKind::Arg`] (the engine would silently clamp them); the
+    /// NULL verdict maps to [`ErrorKind::NotRepresentable`] exactly as
+    /// in [`Document::serialize`].
+    pub fn serialize_with(&self, options: &EmitOptions) -> Result<Vec<u8>> {
+        let opts = options.to_ffi()?;
+        let mut len: usize = 0;
+        let raw = unsafe { ffi::yeptris_serialize_ex(self.raw, &opts, &mut len) };
+        if raw.is_null() {
+            return Err(Error::not_representable("YAML"));
+        }
+        let out = unsafe { std::slice::from_raw_parts(raw as *const u8, len) }.to_vec();
+        unsafe { ffi::yeptris_free(raw as *mut core::ffi::c_void) };
+        Ok(out)
+    }
+
+    /// [`Document::serialize_with`] to an owned UTF-8 string.
+    pub fn serialize_string_with(&self, options: &EmitOptions) -> Result<String> {
+        let bytes = self.serialize_with(options)?;
         String::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Internal))
     }
 }

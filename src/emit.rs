@@ -6,7 +6,7 @@
 
 use crate::ffi::{self, YeptrisBuildEntry};
 use crate::value::{resolve_plain, Number, Value};
-use crate::{Document, Error, ErrorKind, Result};
+use crate::{Document, EmitOptions, Error, ErrorKind, Result};
 
 /// Pack a [`Value`] into a fresh document through the bulk build API
 /// (the format-agnostic first half of the dump lane: the JSON and
@@ -35,6 +35,17 @@ pub(crate) fn build_document(value: &Value) -> Result<Document<'static>> {
 pub fn to_string(value: &Value) -> Result<String> {
     let doc = build_document(value)?;
     let s = doc.serialize_string()?;
+    Ok(s.strip_suffix('\n').unwrap_or(&s).to_owned())
+}
+
+/// [`to_string`] with explicit emitter settings (the engine's
+/// `yeptris_serialize_ex`). Same build, same no-trailing-newline
+/// shape; only the emitter's knobs differ. Invalid settings fail with
+/// [`ErrorKind::Arg`] before anything is built.
+pub fn to_string_with(value: &Value, options: &EmitOptions) -> Result<String> {
+    options.to_ffi()?;
+    let doc = build_document(value)?;
+    let s = doc.serialize_string_with(options)?;
     Ok(s.strip_suffix('\n').unwrap_or(&s).to_owned())
 }
 
@@ -75,7 +86,7 @@ impl Builder {
                 let text = match n {
                     Number::I64(x) => x.to_string(),
                     Number::U64(x) => x.to_string(),
-                    Number::F64(x) => x.to_string(),
+                    Number::F64(x) => float_text(*x),
                 };
                 self.place(
                     ffi::YEPTRIS_BUILD_SCALAR,
@@ -121,6 +132,76 @@ impl Builder {
             }
         }
     }
+}
+
+/// The YAML spelling of an `f64`, byte-for-byte the engine's own
+/// shortest float printer (emit/float/print.c `yep_d2s_shortest` +
+/// `yep_d2s_nonfinite`, the shape canonical emission re-prints):
+///
+/// - non-finite values are the core-schema words `.inf`, `-.inf`,
+///   `.nan` (Rust's `inf`/`NaN` re-parse as strings);
+/// - zero is `0.0` / `-0.0` (the sign survives);
+/// - `1e-4 <= |v| < 1e16` is plain notation that always carries a
+///   fraction (`1.0`, `0.0001`, `123.25`) — Rust's `Display` drops
+///   it for integral values and `1.0` re-parsed as the int `1`;
+/// - everything else is `d.ddde±XX` with at least one fraction digit
+///   and a two-digit exponent minimum (`1.0e+16`, `1.0e-05`), Ruby's
+///   `Float#to_s` shape.
+///
+/// The digits are the shortest round-trip digits (Rust's `{:e}`
+/// formatter), so the text re-parses to the identical bit pattern.
+pub(crate) fn float_text(x: f64) -> String {
+    if x.is_nan() {
+        return ".nan".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { ".inf" } else { "-.inf" }.to_owned();
+    }
+    let mut out = String::with_capacity(32);
+    if x.is_sign_negative() {
+        out.push('-');
+    }
+    if x == 0.0 {
+        out.push_str("0.0");
+        return out;
+    }
+    // "d[.ddd]e<exp>": shortest round-trip digits, exponent unpadded
+    let sci = format!("{:e}", x.abs());
+    let (mantissa, exp) = sci
+        .split_once('e')
+        .expect("LowerExp always writes an exponent");
+    let exp: i32 = exp.parse().expect("LowerExp exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let len = digits.len() as i32;
+    // k: the decimal point sits after k digits (value = 0.digits * 10^k)
+    let k = exp + 1;
+    if (-3..=16).contains(&k) {
+        if k <= 0 {
+            out.push_str("0.");
+            out.extend(std::iter::repeat('0').take((-k) as usize));
+            out.push_str(&digits);
+        } else if k < len {
+            out.push_str(&digits[..k as usize]);
+            out.push('.');
+            out.push_str(&digits[k as usize..]);
+        } else {
+            out.push_str(&digits);
+            out.extend(std::iter::repeat('0').take((k - len) as usize));
+            out.push_str(".0");
+        }
+        return out;
+    }
+    out.push_str(&digits[..1]);
+    out.push('.');
+    if len == 1 {
+        out.push('0');
+    } else {
+        out.push_str(&digits[1..]);
+    }
+    out.push('e');
+    out.push(if exp < 0 { '-' } else { '+' });
+    out.push_str(&format!("{:02}", exp.unsigned_abs()));
+    out
 }
 
 fn entry(op: u8) -> YeptrisBuildEntry {
