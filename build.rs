@@ -220,7 +220,9 @@ fn base_build(snap: &Path, generated: &Path, msvc: bool) -> cc::Build {
     if browser_target() {
         // Emscripten supplies the C headers and scalar, single-thread libc.
         // Rust/wasm-bindgen still owns the final module and its linear memory.
-        build.compiler(browser_compiler());
+        build
+            .compiler(browser_compiler())
+            .target("wasm32-unknown-emscripten");
     }
     build
         .include(generated)
