@@ -1381,6 +1381,15 @@ static int yt_f_run(yt_fused* F) {
                             root_evented = 1;
                             st[0].started = 1;
                         }
+                        if (st[0].content_col == 0) {
+                            /* the root now has content: without it the next
+                             * sibling key re-fires the contentless-root law
+                             * in yt_f_open_form, a second OPEN lands in the
+                             * root's spent-key slot and the replay pairs the
+                             * fresh map as a KEY (issue #1303 — the drain
+                             * walk is the reference law) */
+                            st[0].content_col = st[depth].indent + 1;
+                        }
                     } else if (!st[depth - 1].started && col != st[depth - 1].indent) {
                         yt_f_start(F, &st[depth - 1]);
                     }
