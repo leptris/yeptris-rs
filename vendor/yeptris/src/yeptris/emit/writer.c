@@ -396,7 +396,7 @@ static void emit_plain_folded(yep_writer* w, const char* p, uint32_t n, int fold
     uint32_t i = 0;
     while (i < n) {
         if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + (int)run > w->best_width &&
-            p[i - 1] != ' ' && p[i + 1] != ' ') {
+            p[i - 1] != ' ' && p[i + 1] != ' ' && p[i - 1] != '\t' && p[i + 1] != '\t') {
             if (run) {
                 wr_put(w, p + i - run, run);
                 run = 0;
@@ -481,7 +481,7 @@ static void emit_sq_folded(yep_writer* w, const char* p, uint32_t n, int fold_co
             continue;
         }
         if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + (int)run > w->best_width &&
-            p[i - 1] != ' ' && p[i + 1] != ' ') {
+            p[i - 1] != ' ' && p[i + 1] != ' ' && p[i - 1] != '\t' && p[i + 1] != '\t') {
             if (run) {
                 wr_put(w, p + i - run, run);
                 run = 0;
