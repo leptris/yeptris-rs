@@ -161,7 +161,9 @@ pub(crate) enum ScalarVal<'a> {
 pub(crate) fn resolve_scalar(node: Node<'_>) -> ScalarVal<'_> {
     let bytes = node.value().unwrap_or_default();
     let style = node.style();
-    if style == Style::Plain || style == Style::Any {
+    // An explicit core `str` tag fixes the type: keep the scalar text.
+    let str_tagged = node.tag() == Some(&b"tag:yaml.org,2002:str"[..]);
+    if !str_tagged && (style == Style::Plain || style == Style::Any) {
         resolve_plain_ref(bytes)
     } else {
         ScalarVal::Str(Cow::Owned(String::from_utf8_lossy(bytes).into_owned()))
