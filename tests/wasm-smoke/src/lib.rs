@@ -23,6 +23,20 @@ pub fn smoke() -> Result<String, JsValue> {
             return Err(JsValue::from_str("invalid YAML accepted"));
         }
     }
+    // an explicit core `!!str` tag keeps the scalar's source text
+    let tagged: yeptris::Value =
+        yeptris::from_str("n: !!str 0123\n").map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let expected = yeptris::Value::Tagged(Box::new(yeptris::Tagged {
+        tag: "tag:yaml.org,2002:str".to_owned(),
+        value: yeptris::Value::String("0123".to_owned()),
+    }));
+    let field = match &tagged {
+        yeptris::Value::Mapping(m) => m.get(&yeptris::Value::String("n".to_owned())),
+        _ => None,
+    };
+    if field != Some(&expected) {
+        return Err(JsValue::from_str("explicit !!str scalar text lost"));
+    }
     let error = yeptris::Document::parse(b"bad: [")
         .err()
         .ok_or_else(|| JsValue::from_str("invalid DOM accepted"))?;
