@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- The engine at v0.6.65 by @[object]
+
 ### Added
 
 - Support vendored YAML in Rust browser modules ([#55](https://github.com/leptris/yeptris-rs/pull/55)) by @[object]
