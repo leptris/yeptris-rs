@@ -164,6 +164,7 @@ fn corpus() -> Vec<&'static str> {
         // tags
         "!Thing {a: 1}\n",
         "p: !!int 7\nq: !!str 7\nr: !T [1]\ns: !U {k: v}\n",
+        "a: !!str 0123\nb: !!str 1.50\nc: !!str true\nd: !!str ~\ne: !!str\n",
         "t: !!bool 'true'\n",
         "tagged: !!int '5'\n",
         "tagnull: !!null ~\n",
