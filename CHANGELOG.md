@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.64 by @[object]
+- The vendored engine snapshot rides v0.6.64 by @[object]
+- Type-check the workspace for riscv64gc (Tier 2, std) by @[object]
+- Test the vendored build on Rust 1.86 by @[object]
+- Merge remote-tracking branch 'origin/main' into fix/ukiryu-yaml-fidelity-options by @[object]
+
+### Added
+
+- Support vendored YAML in Rust browser modules ([#55](https://github.com/leptris/yeptris-rs/pull/55)) by @[object]
+
+### Fixed
+
+- Build on Rust 1.86 and tidy emitter clippy findings by @[object]
+- Keep float fidelity and expose explicit emitter options by @[object]
+
+### Other
+
 - The vendored engine snapshot rides v0.6.64 by @[object]
 - Type-check the workspace for riscv64gc (Tier 2, std) by @[object]
 - Test the vendored build on Rust 1.86 by @[object]
