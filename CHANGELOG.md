@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.66 by @[object]
+- Explicit !!str scalars keep their source text by @[object]
+
+### Fixed
+
+- Keep the source text of explicit !!str scalars by @[object]
+
+### Other
+
 - Explicit !!str scalars keep their source text by @[object]
 
 ### Other
