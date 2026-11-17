@@ -5,6 +5,11 @@
  * the kernel at the next sequence boundary. The original SWAR path
  * broke at the first non-ASCII byte and never recovered.
  *
+ * The well-formedness face (yep_utf8_validate) rides a byte-DFA first
+ * (issue #742): one table load per byte answers the dirty-span case,
+ * with the gate kernel still taking the all-ASCII span in one call.
+ * The exact walk remains the authority on rejections (err_pos).
+ *
  * Rules enforced (Unicode 15 well-formedness): no overlong encodings, no
  * UTF-16 surrogate code points (U+D800..U+DFFF), nothing above U+10FFFF,
  * continuation bytes only where a sequence expects them.
@@ -169,7 +174,364 @@ static int validate(const unsigned char* p, size_t len, size_t* err_pos, int pri
     return 1;
 }
 
+/* ---- the well-formedness DFA fast path (issue #742) -------------------
+ *
+ * The CBOR decode profile puts ~40% of the scan-only lane in the
+ * per-byte step walk: real corpora are ~3% high bytes but scattered,
+ * so two thirds of the 32-byte gate windows go dirty and the exact
+ * walk rules them byte by byte (nine-branch first-byte cascade plus
+ * per-byte ascii_ok). The DFA answers each byte with ONE table load:
+ * class (the byte's role) then next-state, with the overlong/
+ * surrogate/U+10FFFF bounds encoded in the transitions — the same
+ * rules step() enforces, in the same order along the span.
+ *
+ * Verdict equivalence is pinned three ways: the tables were derived
+ * from step()'s range rules; a differential harness walked every
+ * boundary sequence of length <= 4 (29 range-edge bytes), the full
+ * two-byte alphabet, every (lead, continuation) pair for the
+ * multi-byte leads, the truncation shapes, 1M random strings, and the
+ * fuzz corpus — 0 mismatches; and test_encoding's pinned verdicts +
+ * err_pos ride the suite. On any DFA rejection the authoritative walk
+ * below re-runs for the pinned err_pos (invalid inputs take the exact
+ * path; valid ones never do).
+ *
+ * The gate answers only the long spans (>= 128 B): short ones (CBOR
+ * map keys are single-digit bytes) fall through the kernel's 16-byte
+ * loop into its scalar per-byte walk, paying a dispatch lookup to get
+ * there — the SWAR loop below answers those spans directly. */
+
+static const uint8_t utf8_class[256] = {
+    /* 00-7F ASCII */ 0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    /* 80-8F */ 1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    /* 90-9F */ 2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    /* A0-BF */ 3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    /* C0-C1 overlong, C2-DF two-byte */ 4,
+    4,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    /* E0, E1-EC, ED, EE-EF */ 6,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    8,
+    7,
+    7,
+    /* F0, F1-F3, F4, F5-FF */ 9,
+    10,
+    10,
+    10,
+    11,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+};
+
+#define UTF8_ST_INVALID 255
+/* 0 START; 1 expect one 80-BF; 2 expect two 80-BF; 3 E0->A0-BF;
+ * 4 F0->90-BF; 5 ED->80-9F; 6 expect three 80-BF; 7 F4->80-8F.
+ * Indexed [state * 16 + class]. */
+static const uint8_t utf8_next[8 * 16] = {
+    0,   255, 255, 255, 255, 1,   3,   2,   5,   4,   6,   7,   255, 255, 255, 255, 255, 0,   0,
+    0,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1,   1,   1,   255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1,   255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 2,   2,   255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 1,   1,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 2,   2,   2,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 2,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+
+/* Verdict-identical to the printable=0 walk (the differential gates
+ * above; the suite pins the observable). 1 = well-formed.
+ *
+ * The loop rides the input's shape: in START state the span's ASCII
+ * runs (97% of real text) advance eight bytes per SWAR test with no
+ * DFA traffic — the high-byte islands pay the table loads alone. The
+ * per-byte branchy walk paid the nine-branch cascade per NON-ASCII
+ * byte and a call per ASCII byte inside dirty windows; the DFA pays
+ * two dependent table loads per non-ASCII byte and nothing else. */
+static int validate_wellformed(const unsigned char* p, size_t len) {
+    /* the gate pays off on long spans only: short ones (CBOR map keys
+     * are single-digit bytes — the #742 profile) fall through the
+     * kernel's 16-byte loop into its scalar per-byte walk, paying a
+     * dispatch lookup to get there; the SWAR loop below answers those
+     * spans directly */
+    if (len >= 128 && yep_text_active()->gate_scan((const char*)p, len) == 0) {
+        return 1; /* every byte gate-safe ASCII */
+    }
+    uint8_t st = 0;
+    size_t j = 0;
+    for (;;) {
+        while (st == 0 && j + 8 <= len) { /* START-state ASCII runs, 8 bytes per test */
+            uint64_t w;
+            memcpy(&w, p + j, sizeof(w));
+            if ((w & 0x8080808080808080ull) != 0) {
+                break;
+            }
+            j += 8;
+        }
+        while (st == 0 && j < len && p[j] < 0x80) { /* the ASCII tail under 8 bytes */
+            j++;
+        }
+        if (j >= len) {
+            break;
+        }
+        st = utf8_next[(uint8_t)((st << 4) | utf8_class[p[j]])];
+        if (st == UTF8_ST_INVALID) {
+            return 0;
+        }
+        j++;
+    }
+    return st == 0;
+}
+
 int yep_utf8_validate(const unsigned char* p, size_t len, size_t* err_pos) {
+    if (p == NULL && len != 0) {
+        if (err_pos != NULL) {
+            *err_pos = 0;
+        }
+        return 0;
+    }
+    if (validate_wellformed(p, len)) {
+        if (err_pos != NULL) {
+            *err_pos = 0;
+        }
+        return 1;
+    }
+    /* the DFA said no: the authoritative walk finds the byte (the
+     * err_pos contract is pinned by test_encoding) */
     return validate(p, len, err_pos, 0);
 }
 

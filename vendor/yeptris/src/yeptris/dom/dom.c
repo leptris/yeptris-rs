@@ -731,9 +731,17 @@ static int jb_string_node(jbuilder* b) {
         }
         n->value = yep_dom_str_commit(
             b->d, yep_finish_double_into(b->p, (uint32_t)(start + 1), (uint32_t)close, dst, span));
+        /* decoded bytes can carry anything the escapes spelled: one
+         * scan prices the fact (#739); 0 keeps the emit-side loop */
+        yep_view dec = yep_dom_view(b->d, n->value);
+        n->json_clean = (uint8_t)yep_scan_json_clean(dec.p, dec.len);
     } else {
         yep_view v = {b->p + start + 1, (uint32_t)(close - start - 1)};
         n->value = dom_str_in(b->d, &v, 1);
+        /* the zero-copy law pays the fact for free: strict JSON
+         * forbids raw C0 in strings, and an unescaped span carries no
+         * '"'/'\' by the scanner's own termination rule (#739) */
+        n->json_clean = 1;
     }
     n->style = YEP_STYLE_DOUBLE_QUOTED;
     n->tag_id = 0; /* str */
@@ -771,6 +779,8 @@ static int jb_scalar_node(jbuilder* b) {
     n->value = dom_str_in(b->d, &v, 1);
     n->style = YEP_STYLE_PLAIN;
     n->implicit = 1;
+    /* literal/number tokens are [a-z0-9+-.]: JSON-clean by grammar */
+    n->json_clean = 1;
     n->tag_id = r->resolve(NULL, v.p, v.len);
     return dom_place(b->d, id) == 0 ? 0 : -1;
 }
@@ -1159,9 +1169,17 @@ int dom_from_tape(yep_dom* d, const yeptris_json_tape* t) {
                         d, yep_finish_double_into(src, off, off + len, dst, len));
                     d->nodes[id].no_exotic = 1; /* JSON-class: escapes
                         only, the walker's law */
+                    {
+                        yep_view dec = yep_dom_view(d, d->nodes[id].value);
+                        d->nodes[id].json_clean = (uint8_t)yep_scan_json_clean(dec.p, dec.len);
+                    }
                 } else {
                     yep_view v = {src + off, len};
                     dom_set_value(d, id, &v, 1);
+                    /* the tape seam rides both tape flavors: one scan
+                     * prices the fact instead of trusting the grammar
+                     * (the lenient route is not the strict gate) */
+                    d->nodes[id].json_clean = (uint8_t)yep_scan_json_clean(src + off, len);
                 }
             } else {
                 yep_view v = {src + off, len};

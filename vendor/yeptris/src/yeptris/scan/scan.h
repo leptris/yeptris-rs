@@ -115,6 +115,13 @@ int yep_scan_dq_forced(const char* p, uint32_t len);
  * rejects; mid-token BOMs ride). */
 int yep_scan_plain_safe(const char* p, uint32_t len);
 
+/* The JSON-clean fact (#739): 1 when the span carries no byte that
+ * emit_dq_json escapes — '"' (0x22), '\\' (0x5c), or C0 (0x00-0x1f).
+ * DEL and every non-ASCII byte ride raw in JSON, so they stay clean.
+ * One home for the JSON builder's parse-time fact bit AND any
+ * emit-side re-check, so the verdicts cannot drift. */
+int yep_scan_json_clean(const char* p, uint32_t len);
+
 /* Tag-shorthand suffix byte: libyaml's URI set (";/?:@&=+$,_.!~*'()%"
  * plus alphanumerics; flow indicators and ',' terminate instead).
  * Stray non-set bytes stay visible as the props follower, which

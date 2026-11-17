@@ -60,22 +60,30 @@ typedef struct yep_sview {
  * fields left the record — they live in the DOM's lazily-built side
  * tables (parse pays nothing; dom.c owns them). */
 typedef struct yep_dnode {
-    uint8_t kind : 2;      /* yep_dom_kind (0-3) */
-    uint8_t style : 3;     /* yep_scalar_style (0-5) */
-    uint8_t flow : 1;      /* collection opened in flow style */
-    uint8_t implicit : 1;  /* scalar written without quotes/tag */
-    uint8_t no_exotic : 1; /* value verified clean of the dq-forced
-                            * byte set (#352 lane 2): the serializer's
-                            * sc_route skips its rescan. Set at every
-                            * value assignment; 0 = unknown = scan. */
-    uint8_t plain_ok;      /* value bytes verified yep_scan_plain_safe
-                            * (#352 lane 3): the emitter skips its
-                            * plain-safety walk (the block kernel's 35%
-                            * frame). Same invariant as no_exotic: set
-                            * at every dom_set_value; 0 = unknown =
-                            * derive. */
-    uint8_t tag_id;        /* resolved tag (resolve/resolver.h) */
-    uint32_t first_child;  /* child link (mappings: key,value,key,value…) */
+    uint8_t kind : 2;       /* yep_dom_kind (0-3) */
+    uint8_t style : 3;      /* yep_scalar_style (0-5) */
+    uint8_t flow : 1;       /* collection opened in flow style */
+    uint8_t implicit : 1;   /* scalar written without quotes/tag */
+    uint8_t no_exotic : 1;  /* value verified clean of the dq-forced
+                             * byte set (#352 lane 2): the serializer's
+                             * sc_route skips its rescan. Set at every
+                             * value assignment; 0 = unknown = scan. */
+    uint8_t plain_ok : 1;   /* value bytes verified yep_scan_plain_safe
+                             * (#352 lane 3): the emitter skips its
+                             * plain-safety walk (the block kernel's 35%
+                             * frame). Same invariant as no_exotic: set
+                             * at every dom_set_value; 0 = unknown =
+                             * derive. */
+    uint8_t json_clean : 1; /* value bytes verified yep_scan_json_clean
+                             * (#739): no '"', no '\', no C0 — the JSON
+                             * writer's fused quote+memcpy arm takes it
+                             * without the per-byte escape loop. Set by
+                             * the JSON builders where the grammar (or
+                             * one decode scan) proves it; dom_set_value
+                             * leaves 0 = unknown = the byte loop, so
+                             * the YAML parse path pays nothing. */
+    uint8_t tag_id;         /* resolved tag (resolve/resolver.h) */
+    uint32_t first_child;   /* child link (mappings: key,value,key,value…) */
     uint32_t last_child;
     uint32_t next_sibling;
     uint32_t count;  /* children (mappings: 2 × pairs) */

@@ -61,6 +61,9 @@ static void wr_maybe_flush(yep_writer* w) {
  * (marshal/to_json.c) writes through the same engine (#904 item 5's
  * move kept ONE writer). */
 void wr_col_update(yep_writer* w, const char* p, uint32_t n) {
+    if (w->skip_col) {
+        return; /* the non-pretty JSON lanes never read col (#739) */
+    }
     for (uint32_t i = n; i > 0; i--) { /* last newline wins */
         if (p[i - 1] == '\n') {
             w->col = (int)(n - i);
@@ -193,10 +196,12 @@ void wr_reserve(yep_writer* w, size_t need) {
 
 void wr_byte(yep_writer* w, char c) {
     w->last = c;
-    if (c == '\n') {
-        w->col = 0;
-    } else {
-        w->col++;
+    if (!w->skip_col) {
+        if (c == '\n') {
+            w->col = 0;
+        } else {
+            w->col++;
+        }
     }
     if (w->dry) {
         w->len++;
@@ -541,6 +546,63 @@ void emit_dq_json(yep_writer* w, const char* p, uint32_t n) {
     wr_byte(w, '"');
 }
 
+/* The fused quote + verbatim + quote write for a string the parse-time
+ * fact bit proved JSON-clean (no '"', no '\', no C0 — the #352 law's
+ * JSON twin, yeptris#739): the escape loop's per-byte dispatch and the
+ * per-run wr_put bookkeeping collapse into one reservation and two
+ * memcpys (the quotes sandwich one span). The fixed-window streaming
+ * route declines when the whole token cannot fit the window — the
+ * general loop chunks it safely (the block specialist's decline law).
+ * The trust-the-count routes (grow=0, cap==0) keep wr_put's exact
+ * write contract: memcpy at p+len with no capacity reasoning. */
+static void emit_dq_json_raw(yep_writer* w, const char* p, uint32_t n) {
+    size_t total = (size_t)n + 2;
+    w->last = '"';
+    if (!w->skip_col) {
+        w->col += (int)total;
+    }
+    if (w->dry) {
+        w->len += total;
+        return;
+    }
+    if (w->oom) {
+        w->len += total; /* a failed growth already stopped the writes */
+        return;
+    }
+    if (w->grow && w->bounded) {
+        /* the caller-buffer route: oversized is oom, counting goes on */
+        if (w->len + total + 1 > w->cap) {
+            w->oom = 1;
+            w->len += total;
+            return;
+        }
+    } else if (w->grow) {
+        if (w->len + total + 1 > w->cap) {
+            wr_grow(w, total);
+            if (w->oom) {
+                w->len += total; /* keep counting: the caller fails on oom */
+                return;
+            }
+            w->reserve = w->cap - w->len - 1;
+        }
+    } else if (w->cap != 0 && w->len + total + 1 > w->cap) {
+        emit_dq_json(w, p, n); /* the window cannot hold the token */
+        return;
+    }
+    if (w->p == NULL) {
+        w->len += total; /* the oom'd growable buffer: keep counting */
+        return;
+    }
+    w->reserve = (size_t)total <= w->reserve ? w->reserve - total : 0;
+    w->p[w->len++] = '"';
+    if (n > 0) {
+        memcpy(w->p + w->len, p, n);
+        w->len += n;
+    }
+    w->p[w->len++] = '"';
+    wr_maybe_flush(w);
+}
+
 /* Literal block: header at the cursor, body lines at parent_col+indent.
  * The explicit indicator spells the pad when it is ambiguous because
  * the pad is defined as parent_col+indent everywhere (the contract
@@ -649,7 +711,9 @@ static void emit_canonical_scalar(yep_writer* w, const yep_dnode* n) {
             if (word != NULL) {
                 uint32_t wl = (uint32_t)strlen(word);
                 if (w->json) {
-                    emit_dq_json(w, word, wl);
+                    /* the inf/nan words are punctuation-only constants:
+                     * the fused raw write is safe without any scan */
+                    emit_dq_json_raw(w, word, wl);
                 } else {
                     wr_put(w, word, wl);
                 }
@@ -695,7 +759,15 @@ static void emit_canonical_scalar(yep_writer* w, const yep_dnode* n) {
         }
     }
     if (w->json) {
-        emit_dq_json(w, p, len);
+        /* the parse-time fact bit (#739): a JSON builder-proven clean
+         * span skips the escape loop for the fused quote+memcpy+quote
+         * write; 0 (YAML-built, mutation-built, tape-decoded-dirty)
+         * keeps the byte loop — derive means derive */
+        if (n->json_clean) {
+            emit_dq_json_raw(w, p, len);
+        } else {
+            emit_dq_json(w, p, len);
+        }
     } else {
         emit_dq(w, p, len);
     }
@@ -725,6 +797,17 @@ enum { YEP_SC_NOTHING = 0, YEP_SC_PLAIN, YEP_SC_SQ, YEP_SC_DQ, YEP_SC_LITERAL, Y
  * machine. PERF-LEDGER carries the numbers. */
 static uint8_t sc_route(yep_writer* w, const char* p, uint32_t len, int as_key, uint8_t sty_in,
                         int has_tag, int no_exotic, int plain_fact) {
+    /* DQ-preservation rides the recorded style (#352 tail cell): a
+     * scalar recorded double-quoted at parse stays double-quoted at
+     * emit, and ANY rides the switch's default arm — for sty_in 3 and
+     * 0 every route below returns YEP_SC_DQ (the dq-forced check, the
+     * flow indicator arm, the switch's default), so the body's walks
+     * (the dq-forced rescan, the per-scalar flow indicator loop, the
+     * multiline memchr + blockable walk) are dead work on the
+     * DQ-heavy cells. Recorded style answers; no re-scan. */
+    if (sty_in == 3 || sty_in == 0) {
+        return YEP_SC_DQ;
+    }
     /* the parse-time fact bits (#352 lanes 2-3): a dnode verified clean
      * of the dq-forced set skips that rescan, and a verified plain-safe
      * span skips the safety walk — 0 (mutation-built or JSON classes)
@@ -1783,18 +1866,230 @@ static void emit_node(yep_emitter* em, uint32_t id, int parent_col, int as_key) 
  * pretty depth) never fires — yet the generic emit_node ->
  * emit_flow path re-tests all of it per node and looks every
  * child up twice. This walk emits the same bytes with one
- * dispatch per node and two per map pair. Pretty output keeps
- * the generic path: its depth/indent bookkeeping is the point
- * there.
+ * dispatch per node and two per map pair, and carries the node
+ * POINTERS down the recursion (the DOM is const during emit; the
+ * id re-lookups were 5% of the lane's samples). Pretty output
+ * keeps the generic path: its depth/indent bookkeeping is the
+ * point there.
+ *
+ * The pair/item specialists (#739): an unpropertied scalar key whose
+ * value is an unpropertied clean STRING (the json_clean fact) writes
+ * as one fused token — separator, "key", ':', "value" — through one
+ * reservation; a clean string seq item likewise. The general path
+ * writes byte-identical output for the same members (the consult is
+ * strictly narrower than the general arms), so a declined member
+ * changes nothing.
  * ============================================================ */
-static void emit_json_node(yep_emitter* em, uint32_t id);
+static void emit_json_node_p(yep_emitter* em, const yep_dnode* n);
 
-static void emit_json_flow(yep_emitter* em, uint32_t id) {
+/* The JSON-clean string scalar the specialists take: no tag, no
+ * anchor, no alias, default tag (str), the fact bit set. */
+static int json_plain_clean_str(const yep_dnode* n) {
+    return n->kind == 0 && n->tag.len == 0 && n->anchor.len == 0 && n->tag_id == 0 && n->json_clean;
+}
+
+/* The typed-simple scalars the specialists take as VALUES/items: an
+ * unpropertied null/bool/int/float. Tags decline (JSON quotes tagged
+ * scalars — the default arm), anchors decline (the general path's
+ * wr_anchor_check unserializable law must stay reachable). */
+static int json_pair_value_ok(const yep_dnode* n) {
+    if (json_plain_clean_str(n)) {
+        return 1;
+    }
+    return n->kind == 0 && n->tag.len == 0 && n->anchor.len == 0 &&
+           (n->tag_id == YEPTRIS_TAG_NULL || n->tag_id == YEPTRIS_TAG_BOOL ||
+            n->tag_id == YEPTRIS_TAG_INT || n->tag_id == YEPTRIS_TAG_FLOAT);
+}
+
+/* The fused map pair (#739 cut 4): an unpropertied clean-string key
+ * whose value is any SIMPLE scalar — clean string, null, bool,
+ * JSON-number int, float — writes as one assembled token: separators,
+ * "key", ':', value. The typed spellings are exactly
+ * emit_canonical_scalar's (the same predicates, the same printer);
+ * anything the specialist cannot prove declines to the general path,
+ * so the bytes cannot drift. Short pairs cross in ONE stack-buffer
+ * memcpy; longer ones ride the same piecewise writes. The
+ * fixed-window streaming route never assembles past the window — the
+ * piecewise arm declines per piece like emit_dq_json_raw does. */
+static int json_pair_value_token(yep_writer* w, const yep_dnode* vn, char* numbuf, const char** tp,
+                                 uint32_t* tl, int* quoted) {
+    yep_view vv = wv(w, vn->value);
+    const char* p = vv.p;
+    uint32_t len = vv.len;
+    *quoted = 0;
+    switch (vn->tag_id) {
+    case YEPTRIS_TAG_NULL:
+        *tp = "null";
+        *tl = 4;
+        return 1;
+    case YEPTRIS_TAG_BOOL: {
+        int bv = yep_tag_bool_value(p, len);
+        if (bv < 0) {
+            return 0; /* not a bool word: the general path quotes it */
+        }
+        *tp = bv ? "true" : "false";
+        *tl = bv ? 4u : 5u;
+        return 1;
+    }
+    case YEPTRIS_TAG_INT:
+        if (json_int_token(p, len)) {
+            *tp = p;
+            *tl = len;
+            return 1;
+        }
+        return 0; /* decode-and-respell ints stay on the general path */
+    case YEPTRIS_TAG_FLOAT: {
+        const char* word = yep_tag_float_word(p, len);
+        if (word != NULL) {
+            /* the inf/nan words ride QUOTED in JSON (no JSON infinity):
+             * punctuation-only constants, safe to assemble raw */
+            *tp = word;
+            *tl = (uint32_t)strlen(word);
+            *quoted = 1;
+            return 1;
+        }
+        char* end = NULL;
+        /* the SAME 39-byte truncation the general arm strtod's through
+         * (emit_canonical_scalar's tmp[40]): a longer numeric token
+         * must accept/parse identically or the d2s bytes would drift */
+        uint32_t copy = len < 39u ? len : 39u;
+        memcpy(numbuf, p, copy);
+        numbuf[copy] = '\0';
+        double d = strtod(numbuf, &end);
+        if (end == NULL || *end != '\0' || end == numbuf) {
+            return 0; /* unparseable view: the general path quotes it */
+        }
+        *tl = (uint32_t)yep_d2s_json(d, numbuf);
+        *tp = numbuf;
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Returns 1 = wrote (dry counts too), 0 = declined (no bytes
+ * written — the caller takes the general path). */
+static int emit_json_pair_fused(yep_writer* w, const yep_dnode* kn, const yep_dnode* vn, int sep) {
+    yep_view kv = wv(w, kn->value);
+    yep_view vv = wv(w, vn->value);
+    int vstr = json_plain_clean_str(vn);
+    char numbuf[48];
+    const char* vt = NULL;
+    uint32_t vtl = 0;
+    int vquoted = 0;
+    int typed = vstr ? 0 : json_pair_value_token(w, vn, numbuf, &vt, &vtl, &vquoted);
+    if (!vstr && !typed) {
+        return 0; /* a typed token the general path must respell/quote */
+    }
+    uint32_t sep_len = 0;
+    if (sep) {
+        sep_len = w->json_compact ? 1u : 2u;
+    }
+    uint32_t colon_len = w->json_compact ? 1u : 2u;
+    uint32_t total =
+        sep_len + kv.len + 2u + colon_len + (typed ? (vquoted ? 2u : 0u) + vtl : 2u + vv.len);
+    /* the run-end law reads w->last for the root newline: spell the
+     * byte that actually lands last (a digit tail for plain tokens) */
+    w->last = (typed && !vquoted && vtl > 0) ? vt[vtl - 1] : '"';
+    if (!w->skip_col) {
+        w->col += (int)total;
+    }
+    if (w->dry) {
+        w->len += total;
+        return 1;
+    }
+    /* the assembled fast form: short pairs only, and only where the
+     * write lands whole (the streaming window declines to piecewise) */
+    int can_assemble = total <= 128u;
+    if (can_assemble && !w->grow && w->cap != 0 && w->len + (size_t)total + 1 > w->cap) {
+        can_assemble = 0; /* the window cannot hold the token */
+    }
+    if (can_assemble && !w->oom) {
+        if (w->grow && !w->bounded && w->len + (size_t)total + 1 > w->cap) {
+            wr_grow(w, total);
+            if (w->oom) {
+                w->len += total; /* keep counting: the caller fails on oom */
+                return 1;
+            }
+            w->reserve = w->cap - w->len - 1;
+        } else if (w->grow && w->bounded && w->len + (size_t)total + 1 > w->cap) {
+            w->oom = 1;
+            w->len += total;
+            return 1;
+        }
+        char* q = w->p + w->len;
+        w->reserve = (size_t)total <= w->reserve ? w->reserve - total : 0;
+        if (sep_len == 1u) {
+            *q++ = ',';
+        } else if (sep_len == 2u) {
+            memcpy(q, ", ", 2);
+            q += 2;
+        }
+        *q++ = '"';
+        if (kv.len > 0) {
+            memcpy(q, kv.p, kv.len);
+            q += kv.len;
+        }
+        *q++ = '"';
+        if (colon_len == 1u) {
+            *q++ = ':';
+        } else {
+            memcpy(q, ": ", 2);
+            q += 2;
+        }
+        if (typed) {
+            if (vquoted) {
+                *q++ = '"';
+            }
+            if (vtl > 0) {
+                memcpy(q, vt, vtl);
+                q += vtl;
+            }
+            if (vquoted) {
+                *q++ = '"';
+            }
+        } else {
+            *q++ = '"';
+            if (vv.len > 0) {
+                memcpy(q, vv.p, vv.len);
+                q += vv.len;
+            }
+            *q++ = '"';
+        }
+        w->len += total;
+        wr_maybe_flush(w);
+        return 1;
+    }
+    /* piecewise: same bytes, each piece carries its own decline law */
+    if (sep) {
+        if (w->json_compact) {
+            wr_byte(w, ',');
+        } else {
+            wr_put(w, ", ", 2);
+        }
+    }
+    emit_dq_json_raw(w, kv.p, kv.len);
+    if (w->json_compact) {
+        wr_byte(w, ':');
+    } else {
+        wr_put(w, ": ", 2);
+    }
+    if (vstr) {
+        emit_dq_json_raw(w, vv.p, vv.len);
+    } else if (vquoted) {
+        emit_dq_json_raw(w, vt, vtl);
+    } else {
+        wr_put(w, vt, vtl);
+    }
+    return 1;
+}
+
+static void emit_json_flow_p(yep_emitter* em, const yep_dnode* n) {
     yep_writer* w = &em->w;
     int saved_flow = w->in_flow;
     w->in_flow = 1;
     const yep_dom* d = em->doc->dom;
-    const yep_dnode* n = yep_dom_node(d, id);
     if (n->tag.len > 0) {
         emit_tag(w, n);
     }
@@ -1807,36 +2102,83 @@ static void emit_json_flow(yep_emitter* em, uint32_t id) {
     uint32_t idx = 0;
     while (child != UINT32_MAX) {
         const yep_dnode* cn = yep_dom_node(d, child);
-        if (idx > 0) {
-            if (w->json_compact) {
-                wr_byte(w, ',');
-            } else {
-                wr_put(w, ", ", 2);
-            }
+        if (cn == NULL) {
+            break;
         }
         if (map) {
+            const yep_dnode* vn = yep_dom_node(d, cn->next_sibling);
+            /* the specialist: clean string key + simple scalar value */
+            if (vn != NULL && json_plain_clean_str(cn) && json_pair_value_ok(vn)) {
+                if (emit_json_pair_fused(w, cn, vn, idx > 0)) {
+                    child = vn->next_sibling;
+                    idx++;
+                    continue;
+                }
+            }
+            if (idx > 0) {
+                if (w->json_compact) {
+                    wr_byte(w, ',');
+                } else {
+                    wr_put(w, ", ", 2);
+                }
+            }
             /* the one generic-path rule JSON keeps: a non-scalar key
              * rides the explicit "? key : " form — same bytes emit_flow
              * writes. (Propertied scalar keys used to join it; JSON
              * drops properties, so they ride the plain quoted form.) */
             if (cn->kind != 0) {
                 wr_put(w, "? ", 2);
-                emit_json_node(em, child);
+                emit_json_node_p(em, cn);
                 wr_put(w, " : ", 3);
             } else {
-                emit_json_node(em, child);
+                emit_json_node_p(em, cn);
                 if (w->json_compact) {
                     wr_byte(w, ':');
                 } else {
                     wr_put(w, ": ", 2);
                 }
             }
-            uint32_t val = cn->next_sibling;
-            emit_json_node(em, val);
-            const yep_dnode* vn = yep_dom_node(d, val);
+            emit_json_node_p(em, vn);
             child = vn != NULL ? vn->next_sibling : UINT32_MAX;
         } else {
-            emit_json_node(em, child);
+            /* the item specialist: a clean string or simple scalar item;
+             * the token resolve runs before any byte is written, so a
+             * decline reaches the general path untouched */
+            char numbuf[48];
+            const char* vt = NULL;
+            uint32_t vtl = 0;
+            int vquoted = 0;
+            int fused = json_pair_value_ok(cn) &&
+                        (json_plain_clean_str(cn) ||
+                         json_pair_value_token(w, cn, numbuf, &vt, &vtl, &vquoted));
+            if (fused) {
+                if (idx > 0) {
+                    if (w->json_compact) {
+                        wr_byte(w, ',');
+                    } else {
+                        wr_put(w, ", ", 2);
+                    }
+                }
+                if (json_plain_clean_str(cn)) {
+                    yep_view cv = wv(w, cn->value);
+                    emit_dq_json_raw(w, cv.p, cv.len);
+                } else if (vquoted) {
+                    emit_dq_json_raw(w, vt, vtl);
+                } else {
+                    wr_put(w, vt, vtl);
+                }
+                child = cn->next_sibling;
+                idx++;
+                continue;
+            }
+            if (idx > 0) {
+                if (w->json_compact) {
+                    wr_byte(w, ',');
+                } else {
+                    wr_put(w, ", ", 2);
+                }
+            }
+            emit_json_node_p(em, cn);
             child = cn->next_sibling;
         }
         idx++;
@@ -1845,10 +2187,8 @@ static void emit_json_flow(yep_emitter* em, uint32_t id) {
     w->in_flow = saved_flow;
 }
 
-static void emit_json_node(yep_emitter* em, uint32_t id) {
+static void emit_json_node_p(yep_emitter* em, const yep_dnode* n) {
     yep_writer* w = &em->w;
-    const yep_dom* d = em->doc->dom;
-    const yep_dnode* n = yep_dom_node(d, id);
     if (n == NULL) {
         return;
     }
@@ -1857,7 +2197,7 @@ static void emit_json_node(yep_emitter* em, uint32_t id) {
         return;
     }
     if (n->kind == 1 || n->kind == 2) {
-        emit_json_flow(em, id);
+        emit_json_flow_p(em, n);
         return;
     }
     if (n->tag.len > 0) {
@@ -1881,6 +2221,12 @@ size_t yep_emit_run(yep_emitter* em, int dry) {
     w->sink_aborted = 0;
     w->col = 0;
     w->sc_i = 0;
+    /* #739: the JSON lanes that never fold set skip_col — the fold
+     * machinery (plain-fold column, flow wrap, pretty depth) is the
+     * only col reader, and none of it arms without json_pretty. One
+     * assignment per run covers every em.w init site (the ledger's
+     * zero-every-field law). */
+    w->skip_col = w->json && !w->json_pretty;
     yep_nametab_clear(&em->canon_names);
     if (w->json) {
         /* JSON has no multi-document streams and no document marker */
@@ -1889,7 +2235,7 @@ size_t yep_emit_run(yep_emitter* em, int dry) {
             if (w->json_pretty) {
                 emit_node(em, d->docs[0], -2, 0);
             } else {
-                emit_json_node(em, d->docs[0]);
+                emit_json_node_p(em, root);
             }
             if (root != NULL && root->kind != 0 && w->last != '\n') {
                 wr_byte(w, '\n');

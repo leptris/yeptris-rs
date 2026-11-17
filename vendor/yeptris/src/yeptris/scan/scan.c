@@ -204,6 +204,16 @@ int yep_scan_dq_forced(const char* p, uint32_t len) {
     return 0;
 }
 
+int yep_scan_json_clean(const char* p, uint32_t len) {
+    for (uint32_t k = 0; k < len; k++) {
+        unsigned char c = (unsigned char)p[k];
+        if (c < 0x20 || c == '"' || c == '\\') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* ---- the plain-safety truth table (moved from emit/style.c,
  * #352 lane 3: scan owns bytes→facts; the emitter and the DOM's
  * parse-time fact bit both read THIS walk so they cannot drift) ---- */

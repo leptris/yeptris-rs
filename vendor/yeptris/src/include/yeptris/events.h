@@ -119,7 +119,14 @@ typedef struct {
     uint32_t tag_off;
     uint32_t tag_len;
 } YeptrisEventRecord; /* 44B — the bindings mirror this layout in the
-                         same lockstep window (the 0.6.9 law) */
+                         same lockstep window (the 0.6.9 law). The
+                         *`*_off` / `*_len` pairs are BYTE offsets+lengths into
+                         the arena (UTF-8 bytes, no trailing NUL): hosts
+                         slice BYTES (ruby: byteslice — a char-indexed
+                         String#[] turns a 22-byte "…ré…" span into 22
+                         chars = 23 bytes and gains a character, the
+                         yeptris#1362 relaton face); the C-side pin is
+                         Events.RecordsArenaSpansAreByteOffsetsMultibyte */
 
 YEPTRIS_API YeptrisRecorder yeptris_recorder_new(void);
 

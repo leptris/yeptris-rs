@@ -45,6 +45,12 @@ typedef struct yep_writer {
     int block_fold;                             /* #903: plain/quoted block scalars fold at
                                                  * best_width (libyaml's plain-fold walk) */
     int col;                                    /* current output column (wr_* maintains) */
+    int skip_col;                               /* #739: the column is the YAML fold machinery's
+                                                   input — the non-pretty JSON lanes never read it,
+                                                   so wr_byte/wr_put skip the maintenance (wr_put's
+                                                   per-span '\n' scan was 25% of the json write
+                                                   lane's samples). Set per run in yep_emit_run
+                                                   (json && !json_pretty); 0 everywhere else. */
     const char* sv_input;                       /* compact-view decode bases (dom regions) */
     const char* sv_arena;
     /* #352: per-scalar route decisions, derived once in the dry
