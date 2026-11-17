@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Release v0.6.72 by @[object]
+
 ### Fixed
 
 - Vendor the engine at v0.6.71 ([#80](https://github.com/leptris/yeptris-rs/pull/80)) by @[object]
