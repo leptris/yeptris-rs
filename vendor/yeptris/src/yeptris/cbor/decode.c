@@ -86,8 +86,19 @@ static void cbor_fail(yep_cdec* c, yep_err_code code, const char* msg) {
 /* The head's argument: additional info 0-23 inline, 24-27 a 1/2/4/8-byte
  * big-endian value; 28-30 are reserved (never well-formed). Strict mode
  * also rejects non-minimal encodings (RFC 8949 s4.2.1's argument rule).
- * ai 31 is the caller's (indefinite/break) — never reaches here. */
-static int cbor_arg(yep_cdec* c, uint8_t ai, uint64_t* val) {
+ * ai 31 is the caller's (indefinite/break) — never reaches here.
+ *
+ * Inlined into cbor_item (the #742 profile's hottest frame pair: the
+ * out-of-line call + strict/nbytes reloads cost measurable share on
+ * int/string-dense shapes). Fixed-width big-endian compose — the
+ * compilers lower the constant-width forms to a rev/bswap load. */
+#if defined(__GNUC__)
+#define CBOR_ARG_INLINE __attribute__((always_inline)) inline
+#else
+#define CBOR_ARG_INLINE /* plain static: MSVC has no always_inline */
+#endif
+
+static CBOR_ARG_INLINE int cbor_arg(yep_cdec* c, uint8_t ai, uint64_t* val) {
     static const uint8_t nbytes[4] = {1, 2, 4, 8};
     static const uint64_t minv[4] = {24, 0x100ull, 0x10000ull, 0x100000000ull};
     if (ai >= 28) {
@@ -95,15 +106,28 @@ static int cbor_arg(yep_cdec* c, uint8_t ai, uint64_t* val) {
     }
     uint64_t v = ai;
     if (ai >= 24) {
+        const unsigned char* q = c->p + c->i;
         size_t n = nbytes[ai - 24];
         if (c->len - c->i < n) {
             cbor_fail(c, YEP_ERR_UNEXPECTED, "truncated head");
             c->status = YEPTRIS_ERROR_PARSE;
             return 0;
         }
-        v = 0;
-        for (size_t k = 0; k < n; k++) {
-            v = (v << 8) | c->p[c->i + k];
+        switch (n) {
+        case 1:
+            v = q[0];
+            break;
+        case 2:
+            v = ((uint64_t)q[0] << 8) | q[1];
+            break;
+        case 4:
+            v = ((uint64_t)q[0] << 24) | ((uint64_t)q[1] << 16) | ((uint64_t)q[2] << 8) | q[3];
+            break;
+        default: /* 8 */
+            v = ((uint64_t)q[0] << 56) | ((uint64_t)q[1] << 48) | ((uint64_t)q[2] << 40) |
+                ((uint64_t)q[3] << 32) | ((uint64_t)q[4] << 24) | ((uint64_t)q[5] << 16) |
+                ((uint64_t)q[6] << 8) | q[7];
+            break;
         }
         c->i += n;
         if (c->strict && v < minv[ai - 24]) {
@@ -811,12 +835,24 @@ static const yep_cbor_sink yep_cbor_dom_sink_impl = {
 int yep_cbor_decode_gen(const unsigned char* p, size_t len, int strict, size_t* consumed,
                         const yep_cbor_sink* sink) {
     yep_cdec c;
-    memset(&c, 0, sizeof(c));
-    c.s = sink;
+    /* field init, not memset: the struct carries the 1000-deep frame
+     * stack (~24 KB) and the decode profile shows small payloads pay
+     * it per call (a 100-byte item memset 200x its size). Every frame
+     * slot is written by cbor_open/the gen loop before it is read, so
+     * the stack needs no zero-init; tagbuf is guarded by taglen. */
+    c.d = NULL;
     c.p = p;
     c.len = len;
+    c.i = 0;
     c.strict = strict;
     c.status = YEPTRIS_OK;
+    c.taglen = 0;
+    c.taglinks = 0;
+    c.ibuf = NULL;
+    c.icap = 0;
+    c.ilen = 0;
+    c.s = sink;
+    c.depth = 0;
     int done_top = 0; /* the ONE top-level item is done (tags never count) */
     int rc;
     for (;;) {

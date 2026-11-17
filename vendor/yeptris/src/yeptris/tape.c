@@ -57,11 +57,17 @@ static int rec_put(tape_ctx* c, uint8_t kind, uint32_t off, uint32_t len) {
     return 1;
 }
 
-static YeptrisStatus tape_carve(yeptris_json_tape* t, size_t len) {
+static YeptrisStatus tape_carve(yeptris_json_tape* t, size_t len, int with_recs) {
     size_t cap = len + 2;
     size_t off_o = (cap + 15) & ~(size_t)15;
-    char* block = yep_alloc(yep_system_allocator(),
-                            off_o + 2 * cap * sizeof(uint32_t) + cap * sizeof(yeptris_tape_rec));
+    /* with_recs=0 (every column-built route): the interleaved record
+     * region is not allocated at all — the strict route never touches
+     * it, and carrying it made the block 17 bytes per input byte (the
+     * #474 profile's madvise lane rode the free of the unused 8).
+     * recs == NULL is the documented column-primary shape (tape.h). */
+    char* block =
+        yep_alloc(yep_system_allocator(), off_o + 2 * cap * sizeof(uint32_t) +
+                                              (with_recs ? cap * sizeof(yeptris_tape_rec) : 0));
     if (block == NULL) {
         return YEPTRIS_ERROR_MEMORY;
     }
@@ -69,7 +75,7 @@ static YeptrisStatus tape_carve(yeptris_json_tape* t, size_t len) {
     t->kinds = (uint8_t*)block;
     t->offs = (uint32_t*)(void*)(block + off_o);
     t->lens = t->offs + cap;
-    t->recs = (yeptris_tape_rec*)(void*)(t->lens + cap);
+    t->recs = with_recs ? (yeptris_tape_rec*)(void*)(t->lens + cap) : NULL;
     t->count = 0;
     t->int_min = 0;
     t->_rec_primary = 0;
@@ -161,7 +167,7 @@ static inline uint8_t tape_inline_punct(const char* p, size_t len, size_t* i, ui
 
 static YeptrisStatus tape_walk(const char* p, size_t len, size_t open, yeptris_json_tape* t,
                                int check_tail) {
-    if (tape_carve(t, len) != YEPTRIS_OK) {
+    if (tape_carve(t, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     uint8_t* kinds = t->kinds;
@@ -388,7 +394,7 @@ reject:
 static YEP_UNUSED_FN YeptrisStatus tape_walk_idx(const char* p, size_t len, size_t open,
                                                  const uint32_t* idx, size_t nidx,
                                                  yeptris_json_tape* t) {
-    if (tape_carve(t, len) != YEPTRIS_OK) {
+    if (tape_carve(t, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     uint8_t* kinds = t->kinds;
@@ -765,7 +771,7 @@ YeptrisStatus yep_tape_walk_lenient_fused(const char* p, size_t len, size_t open
         t->_rec_primary = 1;
         t->_long_key_known = 0;
         t->_long_key = 0;
-    } else if (tape_carve(t, len) != YEPTRIS_OK) {
+    } else if (tape_carve(t, len, 1) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     t->_rec_primary = 1;
@@ -869,7 +875,6 @@ YeptrisStatus yep_tape_walk_lenient_fused(const char* p, size_t len, size_t open
 #define LSTR_SCAN(after)                                                                           \
     do {                                                                                           \
         size_t j_ = i + 1;                                                                         \
-        int esc_ = 0;                                                                              \
         if (j_ + 8 <= len) {                                                                       \
             uint64_t w_;                                                                           \
             memcpy(&w_, p + j_, 8);                                                                \
@@ -922,6 +927,7 @@ YeptrisStatus yep_tape_walk_lenient_fused(const char* p, size_t len, size_t open
         }                                                                                          \
         {                                                                                          \
             const yep_text_kernels* kk_ = yep_text_active();                                       \
+            int esc_ = 0;                                                                          \
             ptrdiff_t r_ = kk_->quote_scan(p + j_, len - j_, '"', &esc_);                          \
             if (r_ >= 0 && esc_ == 0) {                                                            \
                 size_t cl_ = j_ + (size_t)r_;                                                      \
@@ -956,6 +962,7 @@ YeptrisStatus yep_tape_walk_lenient_fused(const char* p, size_t len, size_t open
         {                                                                                          \
             size_t at_ = i;                                                                        \
             size_t cl_ = 0;                                                                        \
+            int esc_ = 0;                                                                          \
             if (!yep_json_string(p, len, &i, &cl_, &esc_)) {                                       \
                 goto lreject;                                                                      \
             }                                                                                      \
@@ -1344,7 +1351,7 @@ static YeptrisStatus yep_tape_walk_columns_fused(const char* p, size_t len, size
      * at the lenient lane's memory traffic. The record walk stays
      * byte-identical beside it; the differential suites pin the
      * equivalence. */
-    if (tape_carve(t, len) != YEPTRIS_OK) {
+    if (tape_carve(t, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     uint8_t* kinds = t->kinds;
@@ -1451,7 +1458,6 @@ static YeptrisStatus yep_tape_walk_columns_fused(const char* p, size_t len, size
 #define LSTR_SCAN(after)                                                                           \
     do {                                                                                           \
         size_t j_ = i + 1;                                                                         \
-        int esc_ = 0;                                                                              \
         if (j_ + 8 <= len) {                                                                       \
             uint64_t w_;                                                                           \
             memcpy(&w_, p + j_, 8);                                                                \
@@ -1505,6 +1511,7 @@ static YeptrisStatus yep_tape_walk_columns_fused(const char* p, size_t len, size
         }                                                                                          \
         {                                                                                          \
             const yep_text_kernels* kk_ = yep_text_active();                                       \
+            int esc_ = 0;                                                                          \
             ptrdiff_t r_ = kk_->quote_scan(p + j_, len - j_, '"', &esc_);                          \
             if (r_ >= 0 && esc_ == 0) {                                                            \
                 size_t cl_ = j_ + (size_t)r_;                                                      \
@@ -1540,6 +1547,7 @@ static YeptrisStatus yep_tape_walk_columns_fused(const char* p, size_t len, size
         {                                                                                          \
             size_t at_ = i;                                                                        \
             size_t cl_ = 0;                                                                        \
+            int esc_ = 0;                                                                          \
             if (!yep_json_string(p, len, &i, &cl_, &esc_)) {                                       \
                 goto lreject;                                                                      \
             }                                                                                      \
@@ -1868,7 +1876,7 @@ lreject:
 static YEP_UNUSED_FN YeptrisStatus tape_walk_lnt(const char* p, size_t len, size_t open,
                                                  const uint32_t* idx, size_t nidx,
                                                  yeptris_json_tape* t) {
-    if (tape_carve(t, len) != YEPTRIS_OK) {
+    if (tape_carve(t, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     uint8_t* kinds = t->kinds;
@@ -2141,7 +2149,7 @@ YEPTRIS_API YeptrisStatus yeptris_parse_json_tape_lenient(const char* source, si
     }
 
     /* scalar root: one record, same deferred split for numbers */
-    if (tape_carve(tape, len) != YEPTRIS_OK) {
+    if (tape_carve(tape, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     tape->_src = source;
@@ -2309,7 +2317,7 @@ YEPTRIS_API YeptrisStatus yeptris_parse_json_tape(const char* source, size_t len
                       "tape walk rejected a validated document at byte %zu", at);
         return YEPTRIS_ERROR_INTERNAL;
     }
-    if (tape_carve(tape, len) != YEPTRIS_OK) {
+    if (tape_carve(tape, len, 0) != YEPTRIS_OK) {
         return YEPTRIS_ERROR_MEMORY;
     }
     tape->_src = source;

@@ -72,10 +72,14 @@ struct yep_engine {
     yep_line_info li_cache;     /* per-line scan_line memo: every site
            positioned at line_start reads it (plain continuation checks,
            literal blocks, the main loop), so a line is scanned once */
-    uint32_t li_cache_line;     /* 0 = no entry (line numbers are 1-based) */
+    uint32_t memo_line;         /* the ONE line key (TODO.max-perf/02):
+                                   facts+li validity, 0 = empty (lines are
+                                   1-based); sits in li_cache_line's old slot
+                                   so the struct geometry does not move */
     yep_line_shape shape_cache; /* per-line shape memo (TODO.restructure/49):
                                    the dispatch decision is made once */
-    uint32_t shape_cache_line;  /* 0 = no entry */
+    uint32_t shape_line;        /* the shape's own lazy key: 0 = empty (the
+                                 * shape_cache_line slot) */
     uint32_t line_base;         /* lines consumed by earlier stepped runs */
     yep_error err;
     const yep_sink* sink;
@@ -107,7 +111,10 @@ struct yep_engine {
     /* the line-facts memo (TODO.restructure/76): one kernel pass per
      * line feeds both the line info and the shape */
     yep_line_facts facts_cache;
-    uint32_t facts_cache_line;
+    uint32_t facts_pad; /* keeps every field after the old facts_cache_line
+                         * at its original offset: the fusion removes one
+                         * uint32 key, the pad restores the geometry so the
+                         * A/B isolates the logic from layout luck */
 
     yep_fold_line fold[YEP_MAX_FOLD_LINES];
     size_t fold_n;
@@ -351,45 +358,36 @@ static void e_line_done(yep_engine* e, size_t at) {
         e->pos = at + br;
         e->line++;
         e->line_start = e->pos;
-        e->li_cache_line = 0;
-        e->shape_cache_line = 0;
-        e->facts_cache_line = 0;
+        e->memo_line = 0;
+        e->shape_line = 0;
     } else {
         e->pos = at;
     }
 }
 
-/* The line-facts memo (TODO.restructure/76): ONE kernel pass per
- * line; li and the shape both derive from it. */
-static const yep_line_facts* e_facts_here(yep_engine* e) {
-    if (e->facts_cache_line != e->line) {
-        yep_scan_facts(e->p, e->len, e->line_start, &e->facts_cache);
-        e->facts_cache_line = e->line;
-        e->li_cache_line = 0; /* derived caches are stale now */
-        e->shape_cache_line = 0;
-    }
-    return &e->facts_cache;
-}
-
-/* scan_line for the current line, memoized for the flow loop (the
- * loop head and the post-ws check each need it every line). */
+/* The one-memo (TODO.max-perf/02): the per-line lane behind ONE line
+ * key. A miss computes facts and li back-to-back (yep_scan_line_f
+ * reads the facts in place — yep_scan_line is exactly this pair), so
+ * every site's hit check is a single compare+branch where a facts
+ * check plus a li check stood; the shape derives lazily on its own
+ * key because only e_classified's dispatch needs it. */
 static yep_line_info e_line_info_here(yep_engine* e) {
-    const yep_line_facts* f = e_facts_here(e);
-    if (e->li_cache_line != e->line) {
-        yep_scan_line_f(e->p, e->len, e->line_start, f, &e->li_cache);
-        e->li_cache_line = e->line;
+    if (e->memo_line != e->line) {
+        yep_scan_facts(e->p, e->len, e->line_start, &e->facts_cache);
+        yep_scan_line_f(e->p, e->len, e->line_start, &e->facts_cache, &e->li_cache);
+        e->memo_line = e->line;
+        e->shape_line = 0; /* the shape reads li: stale now */
     }
     return e->li_cache;
 }
 
-/* The line's classified shape, memoized beside the line facts: the
+/* The line's classified shape, memoized beside the one-memo: the
  * engine decides dispatch ONCE per line (TODO.restructure/49). */
 static const yep_line_shape* e_shape_here(yep_engine* e) {
-    const yep_line_facts* f = e_facts_here(e);
-    e_line_info_here(e);
-    if (e->shape_cache_line != e->line) {
-        yep_scan_shape_f(e->p, e->len, &e->li_cache, f, &e->shape_cache);
-        e->shape_cache_line = e->line;
+    e_line_info_here(e); /* facts+li ride the same key */
+    if (e->shape_line != e->line) {
+        yep_scan_shape_f(e->p, e->len, &e->li_cache, &e->facts_cache, &e->shape_cache);
+        e->shape_line = e->line;
     }
     return &e->shape_cache;
 }
@@ -1017,8 +1015,8 @@ static int e_block_scalar(yep_engine* e, yep_event* ev, int parent_col) {
                             e->pos = at + br;
                             e->line++;
                             e->line_start = e->pos;
-                            e->li_cache_line = 0;
-                            e->shape_cache_line = 0;
+                            e->memo_line = 0;
+                            e->shape_line = 0;
                         } else {
                             e->pos = at;
                         }
@@ -1050,8 +1048,8 @@ static int e_block_scalar(yep_engine* e, yep_event* ev, int parent_col) {
                         e->pos = at + br;
                         e->line++;
                         e->line_start = e->pos;
-                        e->li_cache_line = 0;
-                        e->shape_cache_line = 0;
+                        e->memo_line = 0;
+                        e->shape_line = 0;
                     } else {
                         e->pos = at;
                     }
@@ -1961,9 +1959,8 @@ static int e_flow_node(yep_engine* e, yep_event* ev, int keyish) {
                 e->pos += br;
                 e->line++;
                 e->line_start = e->pos;
-                e->li_cache_line = 0;
-                e->shape_cache_line = 0;
-                e->facts_cache_line = 0;
+                e->memo_line = 0;
+                e->shape_line = 0;
                 if (e->pos >= e->len) {
                     ended = 1;
                     break;
@@ -2395,7 +2392,8 @@ static int e_flow_json(yep_engine* e, yep_view anchor, yep_view tag, uint32_t an
 
 /* Iterative flow kernel; emits events for the whole collection. */
 /* Initializes one flow frame (SSOT: every field, every push site). */
-static void e_flow_frame_init(void* stv, int idx, int kind, int pending_key) {
+static void e_flow_frame_init(void* stv, int idx, int kind, int pending_key, uint32_t open_line,
+                              uint32_t open_col) {
     typedef struct {
         uint8_t kind;
         uint8_t pending_key;
@@ -2414,6 +2412,8 @@ static void e_flow_frame_init(void* stv, int idx, int kind, int pending_key) {
         int32_t buf_from;
         uint32_t entry_line;
         uint32_t entries;
+        uint32_t open_line;
+        uint32_t open_col;
     } e_flow_frame;
     e_flow_frame* st = (e_flow_frame*)stv;
     st[idx].kind = (uint8_t)kind;
@@ -2430,6 +2430,8 @@ static void e_flow_frame_init(void* stv, int idx, int kind, int pending_key) {
     st[idx].buf_from = -1;
     st[idx].entry_line = 0;
     st[idx].entries = 0;
+    st[idx].open_line = open_line;
+    st[idx].open_col = open_col;
 }
 
 static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_id) {
@@ -2449,10 +2451,14 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
         int32_t buf_from;      /* seq: entry events buffered from this index */
         uint32_t entry_line;   /* seq: line where the buffered entry ended */
         uint32_t entries;      /* completed entries (for trailing-comma detection) */
+        uint32_t open_line;    /* 1-based mark of the opening indicator: */
+        uint32_t open_col;     /* libyaml's context mark for its diagnostics */
     } st[YEP_MAX_DEPTH];
     int n = 0;
 
     unsigned char open = (unsigned char)e->p[e->pos];
+    uint32_t open_line = e->line;
+    uint32_t open_col = e_col(e, e->pos) + 1;
     e->pos++;
     yep_event ev;
     e_event_init(&ev, open == '[' ? YEP_EV_SEQ_START : YEP_EV_MAP_START);
@@ -2467,7 +2473,7 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
     if (emit_now(e, &ev) != 0) {
         return -2;
     }
-    e_flow_frame_init(st, n, (open == '[') ? 0 : 1, 0);
+    e_flow_frame_init(st, n, (open == '[') ? 0 : 1, 0, open_line, open_col);
     n++;
 
     for (;;) {
@@ -2620,6 +2626,8 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
                 st[n - 1].pair_value = 1;
             }
             unsigned char oc = (unsigned char)e->p[e->pos];
+            uint32_t oc_line = e->line;
+            uint32_t oc_col = e_col(e, e->pos) + 1;
             e->pos++;
             yep_view pa = ev.anchor, pt = ev.tag; /* props before the opener */
             uint32_t paid = ev.anchor_id;
@@ -2645,7 +2653,7 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
             st[n - 1].key_coll = (uint8_t)coll_key;
             st[n - 1].sep = 0;
             st[n - 1].entries++;
-            e_flow_frame_init(st, n, (oc == '[') ? 0 : 1, 0);
+            e_flow_frame_init(st, n, (oc == '[') ? 0 : 1, 0, oc_line, oc_col);
             n++;
             continue;
         }
@@ -2725,8 +2733,15 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
                 }
                 if (st[n - 1].buf_from >= 0 && !quoted && !q_key &&
                     (save_pos < e->line_start || ev.multiline)) {
-                    /* "[a\n: b]": an IMPLICIT key cannot span lines ("? " may) */
-                    return e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
+                    /* "[a\n: b]": an IMPLICIT key cannot span lines ("? " may).
+                     * libyaml's parser error carries its words and its
+                     * context mark: the '[' that opened this sequence
+                     * (Psych "... while parsing a flow sequence at line 1
+                     * column 1"); the offset stays at the ':' */
+                    yep_error_set(&e->err, YEP_ERR_UNEXPECTED, st[n - 1].open_line,
+                                  st[n - 1].open_col, e->pos, "%s",
+                                  "did not find expected ',' or ']' while parsing a flow sequence");
+                    return -1;
                 }
                 /* single-pair mapping inside a sequence: the entry's
                  * events are buffered; wrap them in MAP_START .. MAP_END */
@@ -3195,7 +3210,7 @@ static int e_flow(yep_engine* e, yep_view anchor, yep_view tag, uint32_t anchor_
                 }
                 st[n - 1].sep = 0;
                 st[n - 1].entries++;
-                e_flow_frame_init(st, n, 1, 1);
+                e_flow_frame_init(st, n, 1, 1, st[n - 1].open_line, st[n - 1].open_col);
                 st[n].pair_wrap = 1; /* the seq single-pair wrapper */
                 n++;
                 continue;
@@ -3857,6 +3872,12 @@ static int e_node(yep_engine* e, yep_ctx ctx, uint32_t floor_col) {
             return -1;
         }
         if (e_colon_at(e, e->pos)) {
+            if (ctx == YEP_CTX_AFTER_COLON && !ev.multiline) {
+                /* "a: 'b': c": a pair separator after a same-line value;
+                 * libyaml's scanner words, marked at the ':' */
+                return e_fail_msg(e, YEP_ERR_UNEXPECTED, e->pos,
+                                  "mapping values are not allowed in this context");
+            }
             if (ctx == YEP_CTX_AFTER_COLON || ev.multiline) {
                 return e_fail(e, YEP_ERR_UNEXPECTED, e->pos);
             }
@@ -3946,7 +3967,13 @@ static int e_node(yep_engine* e, yep_ctx ctx, uint32_t floor_col) {
     }
     if (s.term == YEP_TERM_COLON) {
         if (ctx == YEP_CTX_AFTER_COLON) {
-            return e_fail(e, YEP_ERR_UNEXPECTED, s.end);
+            /* "a: b: c": a second pair separator on the value's line.
+             * libyaml's scanner rejects it with its words, marked at
+             * that ':' (Psych "mapping values are not allowed in this
+             * context at line 1 column 5"); the code, offset and
+             * acceptance are unchanged */
+            return e_fail_msg(e, YEP_ERR_UNEXPECTED, s.end,
+                              "mapping values are not allowed in this context");
         }
         if (node_at > 0 && e->p[node_at - 1] == '\t' && !e->doc_inline) {
             /* (on the --- line the marker-line gate names the same
@@ -5928,9 +5955,8 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
     e->line = 1 + e->line_base;
     e->line_base = 0;
     e->line_start = 0;
-    e->li_cache_line = 0;
-    e->shape_cache_line = 0;
-    e->facts_cache_line = 0;
+    e->memo_line = 0;
+    e->shape_line = 0;
     e->depth = 0;
     yep_nametab_clear(&e->anchors);
     if (e->anchor_placed != NULL) {
