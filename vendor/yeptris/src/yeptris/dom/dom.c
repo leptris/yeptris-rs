@@ -122,6 +122,23 @@ yep_sview yep_dom_str_put(yep_dom* d, const char* p, uint32_t len) {
     if (len == 0) {
         return sv;
     }
+    /* p may point INTO d->str itself (the sinks stage tag/value pieces
+     * via yep_dom_str_tail + yep_dom_str_commit, then re-encode the
+     * committed view through dom_str_in): snapshot the self-offset
+     * BEFORE str_grow — the grow reallocates and frees the old buffer
+     * (the #1468 heap-use-after-free). A staged piece is always
+     * committed first, so the region read is within str_len. */
+    uint32_t self_off = UINT32_MAX;
+    if (d->str != NULL && p >= d->str && p <= d->str + d->str_len) {
+        uint64_t off = (uint64_t)(p - d->str);
+        if (off + len > d->str_len) {
+            /* a staged region extending past str_len would be garbage
+             * after the grow — treat as OOM rather than corrupt */
+            d->oom = 1;
+            return sv;
+        }
+        self_off = (uint32_t)off;
+    }
     if (!str_grow(d, len)) {
         /* OOM: an empty view here would silently corrupt the document
          * (the value reads as ""). Record it; dom_place/dom_open_node
@@ -129,7 +146,7 @@ yep_sview yep_dom_str_put(yep_dom* d, const char* p, uint32_t len) {
         d->oom = 1;
         return sv;
     }
-    memcpy(d->str + d->str_len, p, len);
+    memcpy(d->str + d->str_len, self_off == UINT32_MAX ? p : d->str + self_off, len);
     sv.off = YEP_SV_INPUT | d->str_len;
     sv.len = len;
     d->str_len += len;
