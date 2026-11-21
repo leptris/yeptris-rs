@@ -609,6 +609,9 @@ YEPTRIS_API YeptrisStatus yeptris_json_from_marshal(const char* m, size_t m_len,
                     * block-indents, but the writer stays fully
                     * initialized */
     w->block_fold = 0;
+    w->doc_ascii = 0; /* no DOM regions to derive the fact from: the
+                       * per-span purity gates stay armed (the memset's
+                       * 0 already means "dirty: gate per span") */
 
     mj_ctx c;
     memset(&c, 0, sizeof(c));
