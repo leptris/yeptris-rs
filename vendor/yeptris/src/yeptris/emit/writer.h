@@ -85,6 +85,16 @@ typedef struct yep_writer {
     const struct yep_resolver* resolver; /* the document's implicit-typing
         family (NULL = core12): the INT arm's decode needs the family's
         own forms (leading-0 is octal in compat, decimal in core) */
+    int doc_ascii;                       /* #1490's span-purity gate, hoisted to the document.
+                                            LAST FIELD ON PURPOSE: the hot fields above keep
+                                            main's exact offsets and cache-line layout. 1 =
+                                            every byte of both DOM regions (input + arena) is
+                                            ASCII, so columns are byte counts everywhere and
+                                            every column site keeps the original arithmetic;
+                                            0 = the document carried a high byte, so each site
+                                            gates per span (wr_span_ascii); -1 = not yet
+                                            computed (yep_emit_run derives it once, shared
+                                            dry/wet) */
 } yep_writer;
 
 typedef struct yep_emitter {

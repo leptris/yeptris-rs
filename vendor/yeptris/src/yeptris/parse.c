@@ -82,6 +82,7 @@ yep_dom* yep_doc_dom(yeptris_document* doc) {
             yep_dom* dom = yep_dom_create(doc->sys);
             if (dom != NULL) {
                 dom->resolver = resolver_for_schema(doc->schema);
+                dom->input_ascii = doc->lazy_input_ascii; /* #1490 */
             }
             if (dom != NULL && dom_from_ytape(dom, t) == 0) {
                 doc->dom = dom;
@@ -99,6 +100,9 @@ yep_dom* yep_doc_dom(yeptris_document* doc) {
         } else {
             yeptris_json_tape* t = (yeptris_json_tape*)doc->lazy_tape;
             yep_dom* dom = yep_dom_create(doc->sys);
+            if (dom != NULL) {
+                dom->input_ascii = doc->lazy_input_ascii; /* #1490 */
+            }
             if (dom != NULL && dom_from_tape(dom, t) == 0) {
                 doc->dom = dom;
                 yeptris_tape_free(t);
@@ -135,6 +139,7 @@ static YeptrisDocument yep_json_doc_wrap(yep_dom* dom, const char* buf, size_t l
     doc->sys = sys;
     doc->lazy_tape = NULL;
     doc->lazy_kind = 0;
+    doc->lazy_input_ascii = 0;            /* #1490: the eager dom carries its own fact */
     doc->schema = YEPTRIS_SCHEMA_12_CORE; /* strict JSON is core by construction */
     doc->transcoded = NULL;
     doc->transcoded_len = 0;
@@ -185,6 +190,9 @@ YEPTRIS_API YeptrisDocument yeptris_parse_json(const char* buf, size_t len, Yept
                 if (h != NULL) {
                     ((yeptris_document*)h)->lazy_tape = t;
                     ((yeptris_document*)h)->lazy_kind = 0;
+                    ((yeptris_document*)h)->lazy_input_ascii =
+                        1; /* the fused walk is clean_only: a high byte
+                            * or tab rejected to the strict route below */
                     return h;
                 }
                 yeptris_tape_free(t); /* wrap failed (memory): below */
@@ -225,6 +233,7 @@ YEPTRIS_API YeptrisDocument yeptris_parse_json(const char* buf, size_t len, Yept
         }
         dom->input_base = buf; /* strict JSON is UTF-8 by definition */
         dom->input_len = len;
+        dom->input_ascii = !gated; /* #1490: the gate's clean answer is the fact */
         yep_dom_prepare_len(dom, len);
         int brc = yep_dom_build_json(dom, buf, len);
         if (brc == -1) {
@@ -255,7 +264,7 @@ jfail:
 static int parse_frontend(const char* buf, size_t len, const yep_allocator* sys, int json_mode,
                           const char** data_out, size_t* data_len_out,
                           unsigned char** transcoded_out, size_t* transcoded_len_out,
-                          int* norm_kept_raw_out, YeptrisStatus* st) {
+                          int* norm_kept_raw_out, int* data_ascii_out, YeptrisStatus* st) {
     /* a NULL/0-byte stream is a valid empty input: parse it through a
      * non-null base so the BOM arithmetic never computes NULL+0
      * (clang's UBSan flags the zero-offset-null form; gcc's does not —
@@ -269,6 +278,11 @@ static int parse_frontend(const char* buf, size_t len, const yep_allocator* sys,
     int norm_kept_raw = 0; /* raw NEL/LS/PS survived the quote-aware
                             * walk: the engine route owns the document
                             * (the tape runner predates the cut) */
+    int data_ascii = 0;    /* #1490: the emitter's column fact — the
+                            * gate branch's clean answer proves every
+                            * byte < 0x80 (the writer's byte-priced fast
+                            * paths may ride); anything else keeps the
+                            * per-span gates armed */
 
     if (json_mode) {
         /* JSON mode validated grammar and UTF-8 well-formedness at the
@@ -280,6 +294,9 @@ static int parse_frontend(const char* buf, size_t len, const yep_allocator* sys,
         *transcoded_out = NULL;
         *transcoded_len_out = 0;
         *norm_kept_raw_out = 0;
+        if (data_ascii_out != NULL) {
+            *data_ascii_out = yep_text_active()->gate_scan(data, data_len) == 0;
+        }
         return 0;
     }
 
@@ -324,6 +341,8 @@ static int parse_frontend(const char* buf, size_t len, const yep_allocator* sys,
                 *st = YEPTRIS_ERROR_ENCODING;
                 return -1;
             }
+        } else {
+            data_ascii = 1; /* every byte gate-safe: pure ASCII (#1490) */
         }
     }
 
@@ -347,11 +366,18 @@ static int parse_frontend(const char* buf, size_t len, const yep_allocator* sys,
         }
     }
 
+    if (transcoded != NULL) {
+        data_ascii = 0; /* a transcode or normalize copy rode: the
+                         * copied bytes are not gate-proven */
+    }
     *data_out = data;
     *data_len_out = data_len;
     *transcoded_out = transcoded;
     *transcoded_len_out = transcoded_len;
     *norm_kept_raw_out = norm_kept_raw;
+    if (data_ascii_out != NULL) {
+        *data_ascii_out = data_ascii;
+    }
     return 0;
 }
 
@@ -378,7 +404,7 @@ YeptrisStatus yep_parse_events(const char* buf, size_t len, YeptrisSchema schema
     int norm_kept_raw = 0;
     YeptrisStatus st = YEPTRIS_OK;
     if (parse_frontend(buf, len, sys, 0, &data, &data_len, &transcoded, &transcoded_len,
-                       &norm_kept_raw, &st) != 0) {
+                       &norm_kept_raw, NULL, &st) != 0) {
         return st;
     }
     yep_engine* eng = yep_engine_create(sys);
@@ -464,8 +490,9 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
                             * finish pool and transcoded */
     size_t nblen = 0;
 
+    int data_ascii = 0;
     if (parse_frontend(buf, len, sys, json_mode, &data, &data_len, &transcoded, &transcoded_len,
-                       &norm_kept_raw, &st) != 0) {
+                       &norm_kept_raw, &data_ascii, &st) != 0) {
         goto fail;
     }
 
@@ -512,6 +539,7 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
          * after, every scalar was arena-copied (found 2026-09-10). */
         dom->input_len = data_len;
         dom->input_base = transcoded ? (const char*)transcoded : buf;
+        dom->input_ascii = data_ascii; /* #1490: the emitter's column fact */
         yep_dom_prepare_len(dom, data_len);
     }
     if (!json_mode) {
@@ -648,6 +676,9 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
         st = YEPTRIS_ERROR_MEMORY;
         goto fail;
     }
+    doc->lazy_input_ascii = 0; /* field-by-field ctor (#1490): set below
+                                * for the lazy tape (the eager dom carries
+                                * its own fact) */
     yep_mutex_init(&doc->lazy_mu);
     doc->sys = sys;
     doc->schema = (opts != NULL && opts->schema != YEPTRIS_SCHEMA_12_CORE) ? opts->schema
@@ -704,6 +735,7 @@ static YeptrisDocument parse_impl(const char* buf, size_t len, const YeptrisPars
         doc->dom = NULL;
         doc->lazy_tape = heap_tape;
         doc->lazy_kind = 1;
+        doc->lazy_input_ascii = data_ascii; /* #1490: for the dom build */
     } else {
         doc->dom = dom;
     }

@@ -954,6 +954,7 @@ static YeptrisDocument cbor_wrap(yep_dom* dom, const void* buf, const yep_alloca
     d->finish_pool = NULL;
     d->lazy_tape = NULL; /* field-by-field ctor: no garbage for free */
     d->lazy_kind = 0;
+    d->lazy_input_ascii = 0; /* #1490: CBOR doms keep the gates armed */
     return (YeptrisDocument)d;
 }
 
@@ -1060,7 +1061,8 @@ YEPTRIS_API YeptrisDocument yeptris_cbor_decode(const void* buf, size_t len, uin
     doc->transcoded_len = 0;
     doc->input = (const char*)buf;
     doc->finish_pool = NULL;
-    doc->lazy_tape = NULL; /* field-by-field ctor: no garbage for free */
+    doc->lazy_tape = NULL;     /* field-by-field ctor: no garbage for free */
+    doc->lazy_input_ascii = 0; /* #1490: CBOR doms keep the gates armed */
     if (status != NULL) {
         *status = YEPTRIS_OK;
     }

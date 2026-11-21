@@ -40,6 +40,11 @@ typedef struct yeptris_document {
                             * wait (read-only sharing stays lock-free
                             * once dom is set — every constructor must
                             * yep_mutex_init it, the ctor trap) */
+    int lazy_input_ascii;  /* #1490: the parse's column fact for the
+                            * lazy tape, handed to the dom at
+                            * materialization (parse.c's encoding gate).
+                            * Every constructor must set it (0 =
+                            * conservative, like the ctor trap above). */
 } yeptris_document;
 
 /* Node handle: a (document, node-id) pair so nodes stay usable even if

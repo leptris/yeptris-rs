@@ -161,6 +161,15 @@ typedef struct yep_dom {
     int map_pending_key[YEP_DOM_MAX_DEPTH]; /* per-frame: key seen, value next */
     uint32_t pending_key_id[YEP_DOM_MAX_DEPTH];
     uint32_t pending_key;
+    /* #1490's emitter column fact, derived at parse: 1 = the encoding
+     * gate proved every input byte gate-safe (< 0x80) and no
+     * transcode/normalize copy ran, so input-region views are pure
+     * ASCII and the emitter's columns are byte counts. The arena region
+     * (decoded/copied strings) is NOT covered — the writer still scans
+     * it once per run. LAST FIELD ON PURPOSE: the hot fields above keep
+     * their layout. Defaults to 0 (conservative: per-span gates) via
+     * yep_dom_create's memset; builder/schema routes stay 0. */
+    int input_ascii;
 } yep_dom;
 
 /* Decodes to the pointer view callers use (defined after yep_dom).

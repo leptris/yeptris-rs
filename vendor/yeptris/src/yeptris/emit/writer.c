@@ -60,17 +60,65 @@ static void wr_maybe_flush(yep_writer* w) {
 /* the write primitives below are writer.h-visible: the marshal reader
  * (marshal/to_json.c) writes through the same engine (#904 item 5's
  * move kept ONE writer). */
+
+/* The out-of-line gate on the #1490 helpers: inlined, the purity scans
+ * bloated every hot caller's frame (the auto-vectorizer spills). MSVC
+ * has no GNU attributes — __declspec(noinline) is the same switch
+ * (port.h's popcount/ctz branches are the idiom). */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define WR_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define WR_NOINLINE __attribute__((noinline))
+#else
+#define WR_NOINLINE
+#endif
+
+/* The column is in CHARACTERS (code points) wherever a span carries
+ * multi-byte text (#1490: libyaml's emitter->column counts characters);
+ * a UTF-8 continuation byte (10xxxxxx) adds nothing. */
+static inline int wr_char_cols(const char* p, uint32_t n) {
+    int cols = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        cols += ((unsigned char)p[i] & 0xC0u) != 0x80u;
+    }
+    return cols;
+}
+
+static void WR_NOINLINE wr_col_update_mb(yep_writer* w, const char* p, uint32_t n);
+
 void wr_col_update(yep_writer* w, const char* p, uint32_t n) {
     if (w->skip_col) {
         return; /* the non-pretty JSON lanes never read col (#739) */
     }
+    if (w->doc_ascii == 1) {               /* the run's purity fact: bytes are columns */
+        for (uint32_t i = n; i > 0; i--) { /* last newline wins */
+            if (p[i - 1] == '\n') {
+                w->col = (int)(n - i);
+                return;
+            }
+        }
+        w->col += (int)n;
+        return;
+    }
+    wr_col_update_mb(w, p, n);
+}
+
+/* The dirty-document twin: the same backward pass, OR-riding the
+ * bytes' high bits — purity falls out of the scan the newline search
+ * already is (no second pass). Out of line ON PURPOSE: inlined into
+ * wr_put, the dual loop re-bloated the hot frame and the walk lanes
+ * paid it per scalar (the #1490 restoration's measured lesson). */
+static void WR_NOINLINE wr_col_update_mb(yep_writer* w, const char* p, uint32_t n) {
+    unsigned hi = 0;
     for (uint32_t i = n; i > 0; i--) { /* last newline wins */
-        if (p[i - 1] == '\n') {
-            w->col = (int)(n - i);
+        unsigned char c = (unsigned char)p[i - 1];
+        hi |= c;
+        if (c == '\n') {
+            w->col = (hi & 0x80u) ? wr_char_cols(p + i, n - i) : (int)(n - i);
             return;
         }
     }
-    w->col += (int)n;
+    w->col += (hi & 0x80u) ? wr_char_cols(p, n) : (int)n;
 }
 
 void wr_reserve(yep_writer* w, size_t need);
@@ -199,8 +247,10 @@ void wr_byte(yep_writer* w, char c) {
     if (!w->skip_col) {
         if (c == '\n') {
             w->col = 0;
-        } else {
+        } else if (w->doc_ascii == 1) {
             w->col++;
+        } else {
+            w->col += ((unsigned char)c >> 6) != 2u;
         }
     }
     if (w->dry) {
@@ -369,6 +419,57 @@ static void emit_sq(yep_writer* w, const char* p, uint32_t n) {
     wr_byte(w, '\'');
 }
 
+/* 1 iff EVERY byte of [p, p+n) is ASCII (< 0x80): the per-span purity
+ * gate for dirty documents (the doc-level fact covers clean ones).
+ * SWAR: eight bytes OR'd per step, the high bits inspected once.
+ * OUT OF LINE ON PURPOSE: inlined, the auto-vectorizer turned this
+ * reduction into a NEON block that dragged ten callee-saved vector
+ * registers into every caller's prologue — the fold walks paid the
+ * spill/cleanup per scalar (the -6% the lanes caught). A real call per
+ * span on the dirty paths is cheaper than the prologue everywhere. */
+static int WR_NOINLINE wr_span_ascii(const char* p, uint32_t n) {
+    uint32_t i = 0;
+    uint64_t acc = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t x;
+        memcpy(&x, p + i, 8);
+        acc |= x;
+    }
+    for (; i < n; i++) {
+        acc |= (unsigned char)p[i];
+    }
+    return (acc & YEP_SWAR_FLAGS) == 0;
+}
+
+/* Both span facts the dirty-document fused arm needs, in ONE pass:
+ * ascii (the column gate) and space (the #903 fold-candidate byte —
+ * the arm's inertness probe, standing in for its memchr so purity
+ * rides the scan the arm already paid for). */
+typedef struct wr_span_scan {
+    int ascii;
+    int space;
+} wr_span_scan;
+
+static wr_span_scan WR_NOINLINE wr_span_facts(const char* p, uint32_t n) {
+    uint64_t hi = 0, sp = 0;
+    uint32_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t x;
+        memcpy(&x, p + i, 8);
+        hi |= x;
+        sp |= yep_swar_eq8(x, 0x2020202020202020ull); /* ' ' splat */
+    }
+    for (; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        hi |= c;
+        sp |= (uint64_t)(c == ' ');
+    }
+    wr_span_scan f;
+    f.ascii = (hi & YEP_SWAR_FLAGS) == 0;
+    f.space = sp != 0;
+    return f;
+}
+
 /* Block-side width folding (#903): libyaml's plain/single-quoted fold
  * walk. At an INTERIOR single space (not the value's first or last
  * byte, no adjacent spaces) with the column past best_width, the break
@@ -392,10 +493,17 @@ static void wr_fold_break(yep_writer* w, int fold_col) {
     wr_indent(w, fold_col);
 }
 
-/* The shared walk for a plain body (no doubling to apply). The fold
- * decision prices the PENDING run in (it flushes only at a fold): the
- * live column at the candidate space is w->col + run — exactly
- * libyaml's emitter->column at the same byte. */
+/* The fold walks (#903, dispatched per scalar on the run's purity
+ * fact #1490): the fold decision prices the PENDING run in (it flushes
+ * only at a fold), so the live column at the candidate space is
+ * w->col + run — exactly libyaml's emitter->column at the same byte.
+ * An all-ASCII document folds byte-priced (columns ARE byte counts;
+ * the loop is the original verbatim); a dirty document rides the
+ * character-priced twin. The twins are separate functions ON PURPOSE:
+ * one gated body made every caller's frame pay for both loops and the
+ * auto-vectorizer's prologue spills (the -6% the lanes caught). On a
+ * pure span of a dirty document the dispatch still gates per span
+ * (wr_span_ascii) and keeps the byte walk. */
 static void emit_plain_folded(yep_writer* w, const char* p, uint32_t n, int fold_col) {
     uint32_t run = 0; /* pending flush span length */
     uint32_t i = 0;
@@ -410,6 +518,35 @@ static void emit_plain_folded(yep_writer* w, const char* p, uint32_t n, int fold
             i++; /* the fold consumes the space (libyaml: MOVE without WRITE) */
             continue;
         }
+        i++;
+        run++;
+    }
+    if (run) {
+        wr_put(w, p + n - run, run);
+    }
+}
+
+/* The character-priced twin (#1490): the same walk with the pending
+ * run priced in code points (run stays in bytes for the write). Only
+ * the dispatch below ever calls it — a document that carried a high
+ * byte somewhere. */
+static void emit_plain_folded_mb(yep_writer* w, const char* p, uint32_t n, int fold_col) {
+    uint32_t run = 0; /* pending flush span length (bytes) */
+    int run_cols = 0; /* the same span in characters */
+    uint32_t i = 0;
+    while (i < n) {
+        if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + run_cols > w->best_width &&
+            p[i - 1] != ' ' && p[i + 1] != ' ' && p[i - 1] != '\t' && p[i + 1] != '\t') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+                run_cols = 0;
+            }
+            wr_fold_break(w, fold_col);
+            i++; /* the fold consumes the space (libyaml: MOVE without WRITE) */
+            continue;
+        }
+        run_cols += ((unsigned char)p[i] & 0xC0u) != 0x80u;
         i++;
         run++;
     }
@@ -506,6 +643,65 @@ static void emit_sq_folded(yep_writer* w, const char* p, uint32_t n, int fold_co
     wr_byte(w, '\'');
 }
 
+/* The character-priced twin (#1490) of emit_sq_folded: same law, plus
+ * the run reset at every content break. */
+static void emit_sq_folded_mb(yep_writer* w, const char* p, uint32_t n, int fold_col) {
+    wr_byte(w, '\'');
+    uint32_t run = 0;
+    int run_cols = 0;
+    uint32_t i = 0;
+    int breaks = 0;
+    while (i < n) {
+        if (p[i] == '\n' || p[i] == '\r') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+                run_cols = 0;
+            }
+            if (!breaks && p[i] == '\n') {
+                wr_byte(w, '\n');
+            }
+            wr_byte(w, p[i]);
+            breaks = 1;
+            i++;
+            continue;
+        }
+        if (breaks) {
+            wr_indent(w, fold_col);
+            breaks = 0;
+        }
+        if (p[i] == '\'') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+                run_cols = 0;
+            }
+            wr_put(w, "''", 2);
+            i++;
+            continue;
+        }
+        if (p[i] == ' ' && i > 0 && i + 1 < n && w->col + run_cols > w->best_width &&
+            p[i - 1] != ' ' && p[i + 1] != ' ' && p[i - 1] != '\t' && p[i + 1] != '\t') {
+            if (run) {
+                wr_put(w, p + i - run, run);
+                run = 0;
+                run_cols = 0;
+            }
+            wr_fold_break(w, fold_col);
+            i++;
+            continue;
+        }
+        run_cols += ((unsigned char)p[i] & 0xC0u) != 0x80u;
+        i++;
+        run++;
+    }
+    if (breaks) {
+        wr_indent(w, fold_col);
+    } else if (run) {
+        wr_put(w, p + n - run, run);
+    }
+    wr_byte(w, '\'');
+}
 /* JSON string escapes: \" \\ \b \f \n \r \t and \uXXXX for other
  * controls; raw UTF-8 passes through (RFC 8259). */
 void emit_dq_json(yep_writer* w, const char* p, uint32_t n) {
@@ -559,7 +755,10 @@ static void emit_dq_json_raw(yep_writer* w, const char* p, uint32_t n) {
     size_t total = (size_t)n + 2;
     w->last = '"';
     if (!w->skip_col) {
-        w->col += (int)total;
+        /* characters (#1490), gated: an ASCII span's columns are byte
+         * counts — the JSON fast path keeps its arithmetic unless a
+         * high byte rides */
+        w->col += (w->doc_ascii == 1 || wr_span_ascii(p, n)) ? (int)total : 2 + wr_char_cols(p, n);
     }
     if (w->dry) {
         w->len += total;
@@ -1021,14 +1220,22 @@ static void emit_scalar(yep_writer* w, const yep_dnode* n, int parent_col, int a
             /* #903: block-context width folding; keys never fold
              * (libyaml: allow_breaks = !simple_key_context) and flow
              * members keep the flow walk */
-            emit_plain_folded(w, p, len, parent_col + w->indent);
+            if (w->doc_ascii == 1 || wr_span_ascii(p, len)) {
+                emit_plain_folded(w, p, len, parent_col + w->indent);
+            } else {
+                emit_plain_folded_mb(w, p, len, parent_col + w->indent);
+            }
         } else {
             wr_put(w, p, len);
         }
         break;
     case YEP_SC_SQ:
         if (w->block_fold && !as_key && !w->in_flow && len > 0) {
-            emit_sq_folded(w, p, len, parent_col + w->indent);
+            if (w->doc_ascii == 1 || wr_span_ascii(p, len)) {
+                emit_sq_folded(w, p, len, parent_col + w->indent);
+            } else {
+                emit_sq_folded_mb(w, p, len, parent_col + w->indent);
+            }
         } else {
             emit_sq(w, p, len);
         }
@@ -1486,6 +1693,27 @@ static void emit_flow(yep_emitter* em, uint32_t id) {
     w->in_flow = saved_flow;
 }
 
+/* The dirty-document column accounting for the fused member write
+ * (#1490): one wr_char_cols walk per high-byte span, byte arithmetic
+ * otherwise. Out of line so emit_block_map's hot loop keeps main's
+ * exact frame on clean documents (the gated body in the loop cost the
+ * wide lane -3%). */
+static void WR_NOINLINE wr_fused_cols_mb(yep_writer* w, yep_view kv, yep_view vv, uint32_t f_total,
+                                         uint32_t f_nl) {
+    int cols = (int)f_total;
+    if (!wr_span_ascii(kv.p, kv.len)) {
+        cols += wr_char_cols(kv.p, kv.len) - (int)kv.len;
+    }
+    if (vv.len > 0 && !wr_span_ascii(vv.p, vv.len)) {
+        cols += wr_char_cols(vv.p, vv.len) - (int)vv.len;
+    }
+    if (f_nl) {
+        w->col = cols - 1; /* the break resets, then the line */
+    } else {
+        w->col += cols;
+    }
+}
+
 /* Block map: first key at the cursor (the caller placed it at
  * content_col = parent_col+2); following keys on new lines there. */
 static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
@@ -1494,6 +1722,9 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
     const yep_dnode* n = yep_dom_node(d, id);
     uint32_t child = n->first_child;
     uint32_t pair = 0;
+    /* #1490: the run's purity fact, cached for the loop (fixed for the
+     * whole run by yep_emit_run; the fused arm only rides clean docs) */
+    const int doc_clean = w->doc_ascii == 1;
     while (child != UINT32_MAX) {
         /* #352: the flat plain member specialist — tiny scalar pairs
          * pay dispatch and props checks, not byte work. Strictly
@@ -1523,10 +1754,14 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
              * live column (the first member: the caller placed the
              * cursor at content_col) */
             int m_start = (pair == 0 || w->last == '\n') ? content_col : w->col;
-            /* the empty value's view is {NULL, 0} (wv) — memchr's
-             * nonnull contract forbids the probe even at len 0 */
+            /* the empty value's view is {NULL, 0} (wv) — the probe's
+             * nonnull contract forbids the check even at len 0. Clean
+             * documents keep main's exact memchr probe; dirty ones scan
+             * facts instead — the fold-candidate space AND the column
+             * purity (#1490) ride one pass. */
             int fold_inert = !w->block_fold || w->best_width == INT_MAX || vv.p == NULL ||
-                             memchr(vv.p, ' ', vv.len) == NULL ||
+                             (doc_clean ? memchr(vv.p, ' ', vv.len) == NULL
+                                        : wr_span_facts(vv.p, vv.len).space == 0) ||
                              m_start + (int)kv.len + (int)vv.len + 2 <= w->best_width;
             uint32_t f_ind = 0, f_nl = 0, f_total = 0;
             int fused = fold_inert && kv.len > 0 && !key_written_over_limit(w, kn0) &&
@@ -1552,10 +1787,18 @@ static void emit_block_map(yep_emitter* em, uint32_t id, int content_col) {
             }
             if (fused) {
                 w->last = vv.len > 0 ? (char)vv.p[vv.len - 1] : ':';
-                if (f_nl) {
-                    w->col = (int)(f_total - 1u); /* the break resets, then the line */
+                /* the column in characters (#1490), gated on the run's
+                 * fact: a clean document's member is priced in bytes
+                 * (one reservation covers the whole member); a dirty one
+                 * walks only its high-byte spans, out of line */
+                if (doc_clean) {
+                    if (f_nl) {
+                        w->col = (int)(f_total - 1u); /* the break resets, then the line */
+                    } else {
+                        w->col += (int)f_total;
+                    }
                 } else {
-                    w->col += (int)f_total;
+                    wr_fused_cols_mb(w, kv, vv, f_total, f_nl);
                 }
                 if (w->dry) {
                     w->len += f_total;
@@ -1992,6 +2235,12 @@ static int emit_json_pair_fused(yep_writer* w, const yep_dnode* kn, const yep_dn
     /* the run-end law reads w->last for the root newline: spell the
      * byte that actually lands last (a digit tail for plain tokens) */
     w->last = (typed && !vquoted && vtl > 0) ? vt[vtl - 1] : '"';
+    if (!w->skip_col && w->doc_ascii != 1) {
+        /* #1490: the pair's col scan is arithmetic (bytes), so a dirty
+         * document declines to the general pair path, whose wr_put
+         * accounting prices characters exactly */
+        return 0;
+    }
     if (!w->skip_col) {
         w->col += (int)total;
     }
@@ -2212,6 +2461,18 @@ static void emit_json_node_p(yep_emitter* em, const yep_dnode* n) {
 size_t yep_emit_run(yep_emitter* em, int dry) {
     yep_writer* w = &em->w;
     const yep_dom* d = em->doc->dom;
+    /* The doc-level purity fact (#1490's gate, hoisted): an all-ASCII
+     * document keeps the byte arithmetic everywhere (the hot loops stay
+     * byte-priced, no per-span scans); a multibyte document arms the
+     * per-span gates. The INPUT half is the parse-side fact (parse.c's
+     * encoding gate — no added pass); the arena half holds decoded and
+     * copied strings, so it still earns one SWAR pass per run — small
+     * by construction (zero-copy views ride the input region). Derived
+     * once, shared by the dry and wet passes. */
+    if (w->doc_ascii < 0) {
+        w->doc_ascii = d->input_ascii &&
+                       (d->str == NULL || d->str_len == 0 || wr_span_ascii(d->str, d->str_len));
+    }
     w->dry = dry;
     w->len = 0;
     w->reserve = 0;
