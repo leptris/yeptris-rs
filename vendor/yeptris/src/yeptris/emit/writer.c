@@ -1213,6 +1213,25 @@ static void emit_scalar(yep_writer* w, const yep_dnode* n, int parent_col, int a
             wr_put(w, "~", 1);
             break;
         }
+        /* the round-44 twin on the empty-inline spell: an anchor whose
+         * name ends at ':' must never spell line-final — "k: &n:" + EOL
+         * hands the scanner's riding-colon law to the NEXT line, and a
+         * props/flow/block-led follower un-consumes the colon (the r358
+         * artifact: "&4:- \"\": &4: " + "\n&1 ..." died at re-parse,
+         * "mapping values are not allowed in this context" at the
+         * stripped colon). A non-empty inline value already puts a
+         * plain-led byte on the anchor's own line; the explicit-empty
+         * quoted spell gives the empty twin the same follower
+         * ("k: &n: ''"), and round 2 re-spells it byte-identically (the
+         * quoted style is sticky). Non-scalar and block-style twins
+         * keep the round-44 fail in anchor_name_unspellable. */
+        if (n->anchor.len > 0) {
+            yep_view av = wv(w, n->anchor);
+            if (av.len > 0 && av.p[av.len - 1] == ':') {
+                wr_put(w, "''", 2);
+                break;
+            }
+        }
         break; /* an empty plain value emits as nothing (libyaml's null
                   rendering, issue #290) */
     case YEP_SC_PLAIN:
