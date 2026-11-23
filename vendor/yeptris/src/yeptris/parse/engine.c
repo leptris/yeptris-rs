@@ -5386,6 +5386,29 @@ static size_t norm_next_fold_break(const char* p, size_t len, size_t i, size_t* 
     return 0;
 }
 
+/* The block-fold reader's line crossing. The fold's lines end at ANY
+ * break the engine normalizes (LF, lone CR, CRLF, NEL, LS/PS) — the
+ * one-shot walk's law. The old '\n'-only scans swallowed the line
+ * after a CR-terminated fold line whole, hiding its flow openers and
+ * explicit-key '?' markers from the cut guard: the scan's in_flow
+ * never rose, the next --- looked like a safe interior cut, and the
+ * cut landed inside the engine's still-open flow, mid-token (the
+ * r372 nightly, run 45234218847). Returns the loop's landing offset
+ * (just past the break, the same byte a visited break arm would arm
+ * from) with the line-start state carried, or SIZE_MAX when the
+ * line's break has not arrived yet (the caller holds). */
+static size_t step_fold_line_cross(yep_stepstate* st, size_t k) {
+    size_t br = 0;
+    size_t e = norm_next_fold_break(st->buf, st->len, k, &br);
+    if (br == 0) {
+        return SIZE_MAX; /* the break rides in a later chunk */
+    }
+    st->tok_start = 1;
+    st->word_led = 0;
+    st->at_break = 1;
+    return e + br - 1;
+}
+
 static int step_bs_header(const char* p, size_t len, size_t i) {
     size_t k = i + 1;
     int chomp = 0, indent = 0, space = 0;
@@ -5690,15 +5713,12 @@ static size_t step_scan(yep_stepstate* st) {
                     break;
                 }
                 if (p[k] == '\n' || p[k] == '#') {
-                    size_t e = k;
-                    while (e < st->len && p[e] != '\n') {
-                        e++;
-                    }
-                    if (e >= st->len) {
+                    size_t land = step_fold_line_cross(st, k);
+                    if (land == SIZE_MAX) {
                         hold = i;
                         break;
                     }
-                    i = e; /* blank or comment content: the loop's i++ crosses the break */
+                    i = land; /* blank or comment content: the loop's i++ crosses the break */
                     continue;
                 }
                 int marker =
@@ -5711,15 +5731,12 @@ static size_t step_scan(yep_stepstate* st) {
                 if (!marker && st->bs_indent != (uint32_t)-1 && ind <= st->bs_indent) {
                     st->bs_open = 0; /* the fold ends here: normal processing resumes */
                 } else {
-                    size_t e = k;
-                    while (e < st->len && p[e] != '\n') {
-                        e++;
-                    }
-                    if (e >= st->len) {
+                    size_t land = step_fold_line_cross(st, k);
+                    if (land == SIZE_MAX) {
                         hold = i;
                         break;
                     }
-                    i = e;
+                    i = land;
                     continue;
                 }
             }
