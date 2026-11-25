@@ -81,6 +81,59 @@ pub const YEPTRIS_BUILD_MAP: u8 = 3;
 pub const YEPTRIS_BUILD_END: u8 = 4;
 pub const YEPTRIS_BUILD_TAG: u8 = 5;
 
+/* tape.h record kinds (the kinds column; ABI-pinned order). */
+pub const YEP_T_DOC: u8 = 0;
+pub const YEP_T_NULL: u8 = 1;
+pub const YEP_T_TRUE: u8 = 2;
+pub const YEP_T_FALSE: u8 = 3;
+pub const YEP_T_INT: u8 = 4;
+pub const YEP_T_FLOAT: u8 = 5;
+pub const YEP_T_STR: u8 = 6;
+pub const YEP_T_SEQ_OPEN: u8 = 7;
+pub const YEP_T_MAP_OPEN: u8 = 8;
+pub const YEP_T_CLOSE: u8 = 9;
+/* YEP_T_NUM (10) is the lenient route's deferred record — never on a
+ * strict-route tape; undeclared here so a strict-tape consumer cannot
+ * match it accidentally. */
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct YeptrisJsonTape {
+    pub count: usize,
+    pub kinds: *mut u8,
+    pub offs: *mut u32,
+    pub lens: *mut u32,
+    pub recs: *mut u64, /* yeptris_tape_rec */
+    pub cols_ready: c_int,
+    pub rec_primary: c_int,
+    pub int_min: i64,
+    pub src: *const c_void,
+    pub srclen: usize,
+    pub block: *mut c_void,
+    pub long_key_known: u8,
+    pub long_key: u8,
+}
+
+impl YeptrisJsonTape {
+    /// The all-zero handle `yeptris_parse_json_tape` expects (it
+    /// memsets the struct itself; zeroed is the pre-call state). */
+    pub const ZEROED: YeptrisJsonTape = YeptrisJsonTape {
+        count: 0,
+        kinds: std::ptr::null_mut(),
+        offs: std::ptr::null_mut(),
+        lens: std::ptr::null_mut(),
+        recs: std::ptr::null_mut(),
+        cols_ready: 0,
+        rec_primary: 0,
+        int_min: 0,
+        src: std::ptr::null(),
+        srclen: 0,
+        block: std::ptr::null_mut(),
+        long_key_known: 0,
+        long_key: 0,
+    };
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct YeptrisBuildEntry {
@@ -207,6 +260,32 @@ extern "C" {
         status: *mut YeptrisStatus,
     ) -> YeptrisDocument;
     pub fn yeptris_serialize_json(doc: YeptrisDocument, len: *mut usize) -> *mut c_char;
+
+    /* tape.h — the compact JSON tape (yeptris-rs#104). CALLER-OWNED
+     * handle: parse zeroes it, yeptris_tape_free releases the block.
+     * The strict route (`yeptris_parse_json_tape`) builds the three
+     * columns directly — recs stays NULL and both private flags stay
+     * zero, so the binding reads only count/kinds/offs/lens/int_min;
+     * the private fields ride along so the mirror stays
+     * struct-for-struct with the header (field order IS the ABI). */
+    pub fn yeptris_parse_json_tape(
+        source: *const c_char,
+        len: usize,
+        tape: *mut YeptrisJsonTape,
+    ) -> YeptrisStatus;
+    pub fn yeptris_tape_free(tape: *mut YeptrisJsonTape);
+    /* Converts the INT/FLOAT/NUM records in [from, to): the outputs
+     * are parallel to the RECORD indices. Returns the records
+     * converted, or SIZE_MAX when a span does not re-scan as a number
+     * (impossible for a strict-route tape). Sets tape.int_min when an
+     * INT span exceeds int64. */
+    pub fn yeptris_tape_convert(
+        tape: *mut YeptrisJsonTape,
+        from: usize,
+        to: usize,
+        ivals: *mut i64,
+        dvals: *mut f64,
+    ) -> usize;
 
     /* cbor.h */
     pub fn yeptris_cbor_decode(
