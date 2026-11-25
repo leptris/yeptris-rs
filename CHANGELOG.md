@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- The engine at v0.6.83 by @[object]
+
+### Other
+
 - The engine at v0.6.82 by @[object]
 - Rustfmt the slice-2 tree by @[object]
 - The tape face through Rust - the #104 marshal cut, slice 2 by @[object]
