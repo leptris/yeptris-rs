@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- The engine at v0.6.81 by @[object]
+- Bulk-drain the Value walk - the #104 marshal cut by @[object]
+
+### Other
+
 - The engine at v0.6.80 by @[object]
 
 ### Other
