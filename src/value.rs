@@ -79,8 +79,12 @@ impl Value {
     }
 
     fn from_node_inner(node: Node<'_>, visiting: &mut HashSet<u32>) -> Result<Value> {
-        let tagged = |v: Value, node: &Node<'_>| {
-            match node.tag() {
+        // ONE tag fetch per node (yeptris-rs#104): the walk previously
+        // crossed FFI for the same tag bytes twice per scalar — once
+        // here for wrapping, once inside resolve_scalar's `str` check.
+        let tag = node.tag();
+        let tagged = |v: Value| {
+            match tag {
                 Some(bytes) => match std::str::from_utf8(bytes) {
                     Ok(t) => Value::Tagged(Box::new(Tagged {
                         tag: t.to_owned(),
@@ -94,31 +98,38 @@ impl Value {
             }
         };
         match node.kind() {
-            NodeKind::Scalar => Ok(tagged(scalar_to_value(resolve_scalar(node)), &node)),
+            NodeKind::Scalar => Ok(tagged(scalar_to_value(resolve_scalar_with(node, tag)))),
             NodeKind::Sequence => {
-                let mut items = Vec::with_capacity(node.seq_count());
-                for i in 0..node.seq_count() {
-                    items.push(Value::from_node_inner(
-                        node.seq_at(i)
-                            .ok_or(ErrorKind::Internal)
-                            .map_err(crate::Error::from)?,
-                        visiting,
-                    )?);
+                // ONE bulk drain per container (yeptris-rs#104, the
+                // binding-side half of engine #377): the per-index
+                // accessors (`seq_at`/`map_at`) re-enter the engine's
+                // `dom_indexed_child` per child — one midx mutex pair
+                // plus a FULL sibling-chain rebuild of its one-slot
+                // cache on every return from a deeper container. The
+                // #104 sample profile puts `dom_indexed_child` above
+                // the engine's entire tape walk.
+                let children = node.children();
+                let mut items = Vec::with_capacity(children.len());
+                for child in children {
+                    items.push(Value::from_node_inner(child, visiting)?);
                 }
-                Ok(tagged(Value::Sequence(items), &node))
+                Ok(tagged(Value::Sequence(items)))
             }
             NodeKind::Mapping => {
-                let mut map = Mapping::new();
-                for i in 0..node.map_count() {
-                    let (k, v) = node
-                        .map_at(i)
-                        .ok_or(ErrorKind::Internal)
-                        .map_err(crate::Error::from)?;
-                    let key = Value::from_node_inner(k, visiting)?;
-                    let value = Value::from_node_inner(v, visiting)?;
+                // children() interleaves KEY,VALUE — one drain serves
+                // the whole mapping; `insert` keeps the previous
+                // per-pair last-value-wins on duplicate keys.
+                let children = node.children();
+                let mut map = Mapping(Vec::with_capacity(children.len() / 2));
+                for pair in children.chunks(2) {
+                    if pair.len() != 2 {
+                        break; // unreachable per the engine ABI
+                    }
+                    let key = Value::from_node_inner(pair[0], visiting)?;
+                    let value = Value::from_node_inner(pair[1], visiting)?;
                     map.insert(key, value);
                 }
-                Ok(tagged(Value::Mapping(map), &node))
+                Ok(tagged(Value::Mapping(map)))
             }
             NodeKind::Alias => {
                 let target = node
@@ -159,10 +170,18 @@ pub(crate) enum ScalarVal<'a> {
 /// Null, the nil-placement law; quoted empties keep their real style
 /// and stay strings).
 pub(crate) fn resolve_scalar(node: Node<'_>) -> ScalarVal<'_> {
+    resolve_scalar_with(node, node.tag())
+}
+
+/// Tag-passing form of [`resolve_scalar`]: the caller already holds
+/// the node's tag (one fetch serves both this check and the Tagged
+/// wrap in `from_node_inner`), so the walk pays one FFI crossing for
+/// it, not two.
+pub(crate) fn resolve_scalar_with<'a>(node: Node<'a>, tag: Option<&'a [u8]>) -> ScalarVal<'a> {
     let bytes = node.value().unwrap_or_default();
     let style = node.style();
     // An explicit core `str` tag fixes the type: keep the scalar text.
-    let str_tagged = node.tag() == Some(&b"tag:yaml.org,2002:str"[..]);
+    let str_tagged = tag == Some(&b"tag:yaml.org,2002:str"[..]);
     if !str_tagged && (style == Style::Plain || style == Style::Any) {
         resolve_plain_ref(bytes)
     } else {
