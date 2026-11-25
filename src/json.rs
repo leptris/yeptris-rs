@@ -435,9 +435,7 @@ fn write_value(out: &mut Vec<u8>, v: &Value, depth: usize) -> Result<()> {
                     Value::Bool(false) => out.extend_from_slice(b"false"),
                     // non-scalar keys have no JSON spelling (the
                     // engine build refuses them with a bare PARSE)
-                    Value::Sequence(_) | Value::Mapping(_) => {
-                        return Err(ErrorKind::Parse.into())
-                    }
+                    Value::Sequence(_) | Value::Mapping(_) => return Err(ErrorKind::Parse.into()),
                     // unreachable: has_tagged routed the value away
                     Value::Tagged(_) => return Err(ErrorKind::Parse.into()),
                 }
@@ -851,8 +849,7 @@ b""#,
     fn simple_key_law_rides_the_fallback() {
         for key_len in [1022usize, 1023, 2000] {
             let input = format!("{{\"{}\": 1}}", "k".repeat(key_len));
-            let dom =
-                Document::parse_json(input.as_bytes()).and_then(|d| Value::from_document(&d));
+            let dom = Document::parse_json(input.as_bytes()).and_then(|d| Value::from_document(&d));
             match parse(&input) {
                 Ok(v) => assert_eq!(Some(v), dom.ok(), "key{key_len} drifted"),
                 Err(e) => {
