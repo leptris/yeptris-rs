@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(yeptris
-    VERSION 0.6.88
+    VERSION 0.6.89
     DESCRIPTION "Ultra-fast YAML 1.2 parser, emitter and streamer in C"
     LANGUAGES C CXX
 )
