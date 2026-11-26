@@ -7,5 +7,5 @@
 # project(VERSION): the whole snapshot refreshes as ONE unit.
 #
 # Refresh procedure: README.adoc, "Vendored engine snapshot".
-ref refs/tags/v0.6.86
-commit 17d3cb891e71c0372852dd9cee794449b4a7d2f8
+ref refs/tags/v0.6.87
+commit 178e2310ea8d0dbd1e60f960d5b41fa7864f5722
