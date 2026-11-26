@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "yeptris"
-version = "0.6.84"
+version = "0.6.85"
 dependencies = [
  "cc",
  "serde",
