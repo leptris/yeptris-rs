@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Release v0.6.93 by @[object]
+- The leg agreement reads FILLED slots only by @[object]
+- Release v0.6.92 by @[object]
+
+### Added
+
+- The plan and raw json tape faces (closes #135) by @[object]
+
+### Fixed
+
+- Skip the -Wl,-rpath link-arg on MSVC (closes #136) by @[object]
+
+### Other
+
 - The leg agreement reads FILLED slots only by @[object]
 - Release v0.6.92 by @[object]
 
