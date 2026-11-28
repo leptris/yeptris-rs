@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- The engine at v0.6.93 by @[object]
+
 ### Added
 
 - The plan and raw json tape faces (closes #135) by @[object]
