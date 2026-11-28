@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- The engine at v0.6.94 by @[object]
+- Release v0.6.94 by @[object]
+
+### Other
+
 - Release v0.6.94 by @[object]
 - The engine at v0.6.93 by @[object]
 
