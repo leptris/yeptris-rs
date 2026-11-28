@@ -700,6 +700,13 @@ pub mod plan {
         pub fn column_count(&self) -> usize {
             unsafe { ffi::yeptris_plan_column_count(self.raw) }
         }
+
+        /// The raw handle (crate-internal): the json face's tape leg
+        /// walks the SAME compiled plan (plan.h — one handle, two
+        /// walk doors: `Document::plan_walk` and `json::Plan::walk`).
+        pub(crate) fn raw(&self) -> ffi::YeptrisPlan {
+            self.raw
+        }
     }
 
     /// A column's leaf kind.
@@ -712,7 +719,7 @@ pub mod plan {
     }
 
     impl PlanColumnKind {
-        fn from_raw(k: std::os::raw::c_int) -> Option<PlanColumnKind> {
+        pub(crate) fn from_raw(k: std::os::raw::c_int) -> Option<PlanColumnKind> {
             match k {
                 ffi::YEP_PLAN_INT => Some(PlanColumnKind::Int),
                 ffi::YEP_PLAN_FLOAT => Some(PlanColumnKind::Float),

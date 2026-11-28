@@ -274,6 +274,12 @@ extern "C" {
         tape: *mut YeptrisJsonTape,
     ) -> YeptrisStatus;
     pub fn yeptris_tape_free(tape: *mut YeptrisJsonTape);
+    /* Materializes the kinds/offs/lens columns from the interleaved
+     * records (a no-op when the tape was built column-primary — the
+     * strict route — or the columns are already materialized). FFI
+     * consumers reading the column pointers directly must call this
+     * once first; 0 on success, nonzero on allocation failure. */
+    pub fn yeptris_tape_columns(tape: *mut YeptrisJsonTape) -> c_int;
     /* Converts the INT/FLOAT/NUM records in [from, to): the outputs
      * are parallel to the RECORD indices. Returns the records
      * converted, or SIZE_MAX when a span does not re-scan as a number
@@ -347,6 +353,17 @@ extern "C" {
     pub fn yeptris_plan_result_floats(r: YeptrisPlanResult, col: usize) -> *const f64;
     pub fn yeptris_plan_result_strs(r: YeptrisPlanResult, col: usize) -> *const YeptrisPlanStr;
     pub fn yeptris_plan_result_nulls(r: YeptrisPlanResult, col: usize) -> *const u8;
+    /* plan.h — the TAPE leg: the same result contract, but string
+     * columns carry (off,len) spans into the tape's SOURCE (the
+     * (ptr,len) `strs` accessor answers NULL here); the result must
+     * be freed before the source it borrows. */
+    pub fn yeptris_tape_plan_walk(
+        tape: *const YeptrisJsonTape,
+        plan: YeptrisPlan,
+        status: *mut YeptrisStatus,
+    ) -> YeptrisPlanResult;
+    pub fn yeptris_plan_result_str_offs(r: YeptrisPlanResult, col: usize) -> *const u32;
+    pub fn yeptris_plan_result_str_lens(r: YeptrisPlanResult, col: usize) -> *const u32;
 
     /* memory */
     pub fn yeptris_free(p: *mut core::ffi::c_void);

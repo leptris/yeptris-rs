@@ -139,6 +139,38 @@ for ev in puller.events() {
 }
 ----
 
+=== json plan + tape
+
+The engine's compile-once/walk-many and columnar-parse faces, at C/Ruby/
+Python/JS parity: `json::Plan` compiles a strict-JSON descriptor once and
+applies it to JSON data in one C pass — typed columns, no intermediate
+`Value` tree — and `json::Tape` is the raw record-per-token parse the
+plan walk itself rides.
+
+[source,rust]
+----
+use yeptris::json::{Plan, Tape};
+
+let plan = Plan::compile(
+    r#"{"kind":"map","path":"users","children":[
+        {"name":"id","kind":"int"},{"name":"name","kind":"str"}]}"#,
+)
+.unwrap();
+let cols = plan.walk(r#"{"users":[{"id":7,"name":"ada"}]}"#).unwrap();
+assert_eq!(cols.rows(), 1);
+assert_eq!(cols.ints(0).unwrap(), &[7]);          // BOOL rides the int lane (0/1)
+assert_eq!(cols.strs(1).unwrap(), ["ada"]);       // raw spans into the walked data
+assert_eq!(cols.nulls(0), &[0]);                  // 1 = null/missing leaf
+
+let tape = Tape::parse(r#"{"n": 3}"#).unwrap();
+let cols = tape.columns().unwrap();               // kinds / offs / lens, one per record
+assert_eq!(tape.count(), cols.count());
+----
+
+The same compiled spec walks through the DOM leg too
+(`yeptris::plan::Plan` + `Document::plan_walk`) over a parsed YAML/JSON
+document; missing or null leaves mark their slot null on both legs.
+
 == Mapping to the C engine
 
 The crate is a binding, not a reimplementation. Rust types map onto the
