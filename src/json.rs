@@ -9,6 +9,11 @@
 //! canonical JSON byte-for-byte (differentially pinned), with the
 //! engine route kept for the corners JSON cannot spell (tagged
 //! values) — see [`serialize`].
+//!
+//! The raw faces behind the tree routes are exposed too (yeptris-rs#135,
+//! the C/Ruby/Python/JS parity set): [`Tape::parse`] + [`Tape::columns`]
+//! price the tape without any tree, and [`Plan::compile`] + [`Plan::walk`]
+//! price the compiled-descriptor walk — typed columns in one C pass.
 
 use std::ffi::c_char;
 use std::io::Write as _;
@@ -21,6 +26,12 @@ use crate::{Document, Error, ErrorKind, Result};
 
 use crate::emit;
 use crate::ffi;
+
+mod plan;
+mod tape;
+
+pub use self::plan::{Plan, WalkResult};
+pub use self::tape::{record, Tape, TapeColumns};
 
 impl Document<'_> {
     /// Parse JSON from bytes. The engine borrows the buffer — hold it
