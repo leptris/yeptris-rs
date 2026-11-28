@@ -55,18 +55,26 @@ YEPTRIS_API size_t yeptris_plan_column_count(const yeptris_plan* plan);
 
 /* Applies the plan to a tape (from yeptris_parse_json_tape; the
  * LENIENT tape also works — NUM records convert at extraction).
- * Every row of the collection fills one slot per column; missing or
- * null leaves mark the slot null. Returns NULL with *st on
- * PARSE (document shape disagreement) or MEMORY. */
+ * The rows container's shape decides the rows: a SEQUENCE rows its
+ * mapping children; a MAPPING rows its mapping values (the
+ * map-of-records form) — unless one of the mapping's OWN keys names
+ * a planned leaf, which makes the mapping itself ONE record (the
+ * scalar-map leaf: rows = 1, the pairs fill the columns). An empty
+ * container rows nothing. Every row fills one slot per column;
+ * missing, null, mistyped, or container-valued leaves mark the slot
+ * null. Returns NULL with *st on PARSE (document shape
+ * disagreement) or MEMORY. */
 YEPTRIS_API yeptris_plan_result*
 yeptris_tape_plan_walk(const yeptris_json_tape* tape, const yeptris_plan* plan, YeptrisStatus* st);
 
 /* The YAML/DOM leg: the same compiled plan applied to a parsed
- * yeptris document (yeptris_parse — any schema). Typed extraction
- * rides the parse-time tag ids; string columns expose (ptr,len)
- * views into the document's regions (input or string arena), so the
- * RESULT BORROWS the document — free the result first. Same status
- * contract as the tape walk. */
+ * yeptris document (yeptris_parse — any schema), with the same row
+ * semantics as the tape walk (sequence children; mapping values; a
+ * mapping whose own key names a planned leaf is ONE record). Typed
+ * extraction rides the parse-time tag ids; string columns expose
+ * (ptr,len) views into the document's regions (input or string
+ * arena), so the RESULT BORROWS the document — free the result
+ * first. Same status contract as the tape walk. */
 YEPTRIS_API yeptris_plan_result*
 yeptris_document_plan_walk(YeptrisDocument doc, const yeptris_plan* plan, YeptrisStatus* st);
 

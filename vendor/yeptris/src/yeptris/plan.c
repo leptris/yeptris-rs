@@ -285,6 +285,18 @@ YEPTRIS_API size_t yeptris_plan_column_count(const yeptris_plan* plan) {
     return plan == NULL ? 0 : plan->ncols;
 }
 
+/* The planned column the tape STR record at +i+ names, or -1. */
+static int tape_leaf_index(const yeptris_json_tape* t, const yeptris_plan* plan, size_t i) {
+    const char* src = (const char*)t->_src;
+    for (size_t c = 0; c < plan->ncols; c++) {
+        if (t->lens[i] == plan->cols[c].name_len &&
+            memcmp(src + t->offs[i], plan->cols[c].name, plan->cols[c].name_len) == 0) {
+            return (int)c;
+        }
+    }
+    return -1;
+}
+
 /* Finds the rows container's OPEN record: the root OPEN's child
  * matching each path segment in turn (a map root), or the root OPEN
  * itself (a seq root). Returns the record index of the container
@@ -447,35 +459,69 @@ yeptris_tape_plan_walk(const yeptris_json_tape* tape, const yeptris_plan* plan, 
     }
     size_t rows_close = tape->offs[rows_open];
 
-    /* pass one: count the row MAP_OPENs directly inside the container */
+    /* pass one: classify the container + count the rows. A sequence
+     * container rows its mapping children. A mapping container rows
+     * its mapping values (the map-of-records form) — unless one of
+     * its OWN keys names a planned leaf, which makes the mapping
+     * itself ONE record (the scalar-map leaf, yeptris-ruby#430: its
+     * pairs are the record's fields). An empty container rows
+     * nothing. */
+    int record_mode = 0;
     size_t rows = 0;
-    {
+    if (rows_kind == YEP_T_SEQ_OPEN) {
         int depth = 0;
         for (size_t i = rows_open + 1; i < rows_close; i++) {
             uint8_t k = tape->kinds[i];
-            if (depth == 0 && k == YEP_T_MAP_OPEN) {
-                rows++;
-            }
-            if (k == YEP_T_MAP_OPEN || k == YEP_T_SEQ_OPEN) {
+            if (k == YEP_T_MAP_OPEN) {
+                if (depth == 0) {
+                    rows++;
+                }
+                depth++;
+            } else if (k == YEP_T_SEQ_OPEN) {
                 depth++;
             } else if (k == YEP_T_CLOSE) {
                 depth--;
             }
         }
+    } else {
+        /* the mapping container: a depth-0 pair walk — containers
+         * skip whole at their CLOSE, so no depth counter is needed */
+        int expect_key = 1;
+        for (size_t i = rows_open + 1; i < rows_close; i++) {
+            uint8_t k = tape->kinds[i];
+            if (expect_key) {
+                if (k == YEP_T_STR && tape_leaf_index(tape, plan, i) >= 0) {
+                    record_mode = 1;
+                }
+                expect_key = 0;
+                continue;
+            }
+            expect_key = 1;
+            if (k == YEP_T_MAP_OPEN || k == YEP_T_SEQ_OPEN) {
+                if (k == YEP_T_MAP_OPEN) {
+                    rows++; /* a mapping value: one row of the records form */
+                }
+                i = tape->offs[i]; /* the row (or record field) ends at its CLOSE */
+            }
+        }
+        if (record_mode) {
+            rows = 1;
+        }
     }
 
-    size_t ncols = plan->ncols;
     yeptris_plan_result* r = plan_result_carve(plan, rows, 8, st);
     if (r == NULL) {
         return NULL;
     }
 
     /* pass two: fill. Rows are MAP_OPEN..CLOSE at container depth 0;
-     * each pair's key span matches a planned leaf name. */
+     * each pair's key span matches a planned leaf name. Record mode:
+     * the container itself is the one row — its pairs sit one level
+     * in, so the walk enters it already "inside a row". */
     const char* src = (const char*)tape->_src;
     size_t row = 0;
-    int depth = 0;
-    int row_start = 0;
+    int depth = record_mode ? 1 : 0;
+    int row_start = record_mode;
     for (size_t i = rows_open + 1; i < rows_close && row < rows; i++) {
         uint8_t k = tape->kinds[i];
         if (k == YEP_T_MAP_OPEN || k == YEP_T_SEQ_OPEN) {
@@ -497,14 +543,7 @@ yeptris_tape_plan_walk(const yeptris_json_tape* tape, const yeptris_plan* plan, 
             continue; /* not a key position inside a row map */
         }
         /* the key: match against the plan leaves */
-        int col_idx = -1;
-        for (size_t c = 0; c < ncols; c++) {
-            if (tape->lens[i] == plan->cols[c].name_len &&
-                memcmp(src + tape->offs[i], plan->cols[c].name, plan->cols[c].name_len) == 0) {
-                col_idx = (int)c;
-                break;
-            }
-        }
+        int col_idx = tape_leaf_index(tape, plan, i);
         if (col_idx < 0) {
             continue; /* not a planned leaf: skip its value below */
         }
@@ -565,6 +604,10 @@ yeptris_tape_plan_walk(const yeptris_json_tape* tape, const yeptris_plan* plan, 
             break;
         }
         i = v; /* the value record is consumed */
+        if (vk == YEP_T_MAP_OPEN || vk == YEP_T_SEQ_OPEN) {
+            i = tape->offs[v]; /* a container at a planned leaf ends at
+                                * its CLOSE — its keys are NOT row keys */
+        }
         continue;
     bad_row_value:
         i = v;
@@ -656,6 +699,106 @@ static uint32_t dom_rows_next(const yep_dom* d, const yep_dnode* container, uint
     return v->next_sibling;
 }
 
+/* The single-record form (yeptris-ruby#430): a MAPPING container one
+ * of whose OWN keys names a planned leaf IS the record — its pairs
+ * are the fields. Returns the container, or NULL (rows come from the
+ * mapping values / sequence children instead). */
+static const yep_dnode* dom_single_record(const yep_dom* d, const yep_dnode* container,
+                                          const yeptris_plan* plan) {
+    if (container->kind != YEP_DOM_MAPPING) {
+        return NULL;
+    }
+    for (uint32_t cn = container->first_child; cn != UINT32_MAX;) {
+        const yep_dnode* k = yep_dom_node(d, cn);
+        const yep_dnode* v = yep_dom_node(d, k->next_sibling);
+        yep_view kv = sv_view(d, k->value);
+        if (k->kind == YEP_DOM_SCALAR) {
+            for (size_t c = 0; c < plan->ncols; c++) {
+                if (kv.len == plan->cols[c].name_len &&
+                    memcmp(kv.p, plan->cols[c].name, plan->cols[c].name_len) == 0) {
+                    return container;
+                }
+            }
+        }
+        cn = v->next_sibling;
+    }
+    return NULL;
+}
+
+/* Fills row +row_i+ of +r+ from +row+'s pairs: each scalar key is
+ * matched against the planned leaves, and the value lands in its
+ * column when the tag agrees. Null / missing / mistyped / container
+ * values leave the slot null (the carve pre-set the bitmap). */
+static void dom_fill_row(const yep_dom* d, const yeptris_plan* plan, const yep_dnode* row,
+                         size_t row_i, yeptris_plan_result* r) {
+    for (uint32_t cn = row->first_child; cn != UINT32_MAX;) {
+        const yep_dnode* k = yep_dom_node(d, cn);
+        const yep_dnode* v = yep_dom_node(d, k->next_sibling);
+        yep_view kv = sv_view(d, k->value);
+        int col_idx = -1;
+        if (k->kind == YEP_DOM_SCALAR) {
+            for (size_t c = 0; c < plan->ncols; c++) {
+                if (kv.len == plan->cols[c].name_len &&
+                    memcmp(kv.p, plan->cols[c].name, plan->cols[c].name_len) == 0) {
+                    col_idx = (int)c;
+                    break;
+                }
+            }
+        }
+        if (col_idx >= 0) {
+            const yep_dnode* val = dom_alias_final(d, v);
+            yep_result_col* col = &r->cols[col_idx];
+            if (val != NULL && val->kind == YEP_DOM_SCALAR && val->tag_id != YEPTRIS_TAG_NULL) {
+                yep_view sv = sv_view(d, val->value);
+                int filled = 0;
+                switch (col->kind) {
+                case YEP_PLAN_STR:
+                    col->views[row_i].p = sv.p;
+                    col->views[row_i].len = sv.len;
+                    filled = 1;
+                    break;
+                case YEP_PLAN_INT: {
+                    int64_t iv;
+                    if (val->tag_id == YEPTRIS_TAG_INT && yep_num_i64(sv.p, sv.len, &iv) == 0) {
+                        col->ints[row_i] = iv;
+                        filled = 1;
+                    }
+                    break;
+                }
+                case YEP_PLAN_FLOAT: {
+                    double dv;
+                    if (val->tag_id == YEPTRIS_TAG_FLOAT) {
+                        if (yep_num_f64(sv.p, sv.len, &dv) == 0) {
+                            col->floats[row_i] = dv;
+                            filled = 1;
+                        }
+                    } else if (val->tag_id == YEPTRIS_TAG_INT) {
+                        int64_t iv;
+                        if (yep_num_i64(sv.p, sv.len, &iv) == 0) {
+                            col->floats[row_i] = (double)iv;
+                            filled = 1;
+                        }
+                    }
+                    break;
+                }
+                case YEP_PLAN_BOOL:
+                    if (val->tag_id == YEPTRIS_TAG_BOOL) {
+                        col->ints[row_i] = yep_num_bool(sv.p, sv.len);
+                        filled = 1;
+                    }
+                    break;
+                }
+                if (filled) {
+                    col->nulls[row_i] = 0;
+                }
+            }
+            /* null / missing / tag disagreement / a container at a
+             * planned leaf: the slot stays null, the walk goes on */
+        }
+        cn = v->next_sibling;
+    }
+}
+
 YEPTRIS_API yeptris_plan_result*
 yeptris_document_plan_walk(YeptrisDocument doc, const yeptris_plan* plan, YeptrisStatus* st) {
     if (st != NULL) {
@@ -677,12 +820,18 @@ yeptris_document_plan_walk(YeptrisDocument doc, const yeptris_plan* plan, Yeptri
         return NULL;
     }
 
+    /* the single-record form wins over the mapping-values form */
+    const yep_dnode* single = dom_single_record(dd, container, plan);
     size_t rows = 0;
-    for (uint32_t cur = container->first_child; cur != UINT32_MAX;) {
-        const yep_dnode* row;
-        cur = dom_rows_next(dd, container, cur, &row);
-        if (row != NULL) {
-            rows++;
+    if (single != NULL) {
+        rows = 1;
+    } else {
+        for (uint32_t cur = container->first_child; cur != UINT32_MAX;) {
+            const yep_dnode* row;
+            cur = dom_rows_next(dd, container, cur, &row);
+            if (row != NULL) {
+                rows++;
+            }
         }
     }
 
@@ -691,6 +840,10 @@ yeptris_document_plan_walk(YeptrisDocument doc, const yeptris_plan* plan, Yeptri
         return NULL;
     }
 
+    if (single != NULL) {
+        dom_fill_row(dd, plan, single, 0, r);
+        return r;
+    }
     size_t row_i = 0;
     for (uint32_t cur = container->first_child; cur != UINT32_MAX && row_i < rows;) {
         const yep_dnode* row;
@@ -698,73 +851,7 @@ yeptris_document_plan_walk(YeptrisDocument doc, const yeptris_plan* plan, Yeptri
         if (row == NULL) {
             continue;
         }
-        uint32_t cn = row->first_child;
-        while (cn != UINT32_MAX) {
-            const yep_dnode* k = yep_dom_node(dd, cn);
-            const yep_dnode* v = yep_dom_node(dd, k->next_sibling);
-            yep_view kv = sv_view(dd, k->value);
-            int col_idx = -1;
-            if (k->kind == YEP_DOM_SCALAR) {
-                for (size_t c = 0; c < plan->ncols; c++) {
-                    if (kv.len == plan->cols[c].name_len &&
-                        memcmp(kv.p, plan->cols[c].name, plan->cols[c].name_len) == 0) {
-                        col_idx = (int)c;
-                        break;
-                    }
-                }
-            }
-            if (col_idx >= 0) {
-                const yep_dnode* val = dom_alias_final(dd, v);
-                yep_result_col* col = &r->cols[col_idx];
-                if (val != NULL && val->kind == YEP_DOM_SCALAR && val->tag_id != YEPTRIS_TAG_NULL) {
-                    yep_view sv = sv_view(dd, val->value);
-                    int filled = 0;
-                    switch (col->kind) {
-                    case YEP_PLAN_STR:
-                        col->views[row_i].p = sv.p;
-                        col->views[row_i].len = sv.len;
-                        filled = 1;
-                        break;
-                    case YEP_PLAN_INT: {
-                        int64_t iv;
-                        if (val->tag_id == YEPTRIS_TAG_INT && yep_num_i64(sv.p, sv.len, &iv) == 0) {
-                            col->ints[row_i] = iv;
-                            filled = 1;
-                        }
-                        break;
-                    }
-                    case YEP_PLAN_FLOAT: {
-                        double dv;
-                        if (val->tag_id == YEPTRIS_TAG_FLOAT) {
-                            if (yep_num_f64(sv.p, sv.len, &dv) == 0) {
-                                col->floats[row_i] = dv;
-                                filled = 1;
-                            }
-                        } else if (val->tag_id == YEPTRIS_TAG_INT) {
-                            int64_t iv;
-                            if (yep_num_i64(sv.p, sv.len, &iv) == 0) {
-                                col->floats[row_i] = (double)iv;
-                                filled = 1;
-                            }
-                        }
-                        break;
-                    }
-                    case YEP_PLAN_BOOL:
-                        if (val->tag_id == YEPTRIS_TAG_BOOL) {
-                            col->ints[row_i] = yep_num_bool(sv.p, sv.len);
-                            filled = 1;
-                        }
-                        break;
-                    }
-                    if (filled) {
-                        col->nulls[row_i] = 0;
-                    }
-                }
-                /* null / missing / tag disagreement / a container at a
-                 * planned leaf: the slot stays null, the walk goes on */
-            }
-            cn = v->next_sibling;
-        }
+        dom_fill_row(dd, plan, row, row_i, r);
         row_i++;
     }
     return r;
