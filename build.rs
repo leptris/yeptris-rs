@@ -68,8 +68,13 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dir.display());
         println!("cargo:rustc-link-lib=dylib={name}");
         // Let test binaries find the dylib at run time without
-        // requiring DYLD_LIBRARY_PATH.
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
+        // requiring DYLD_LIBRARY_PATH. MSVC only: `-Wl,` is GNU-ld
+        // syntax — link.exe rejects it, and windows has no runtime
+        // rpath at all (the loader searches the exe dir and PATH;
+        // YEPTRIS_LIB_DIR below names the directory) — yeptris-rs#136.
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
+        }
         println!("cargo:rustc-env=YEPTRIS_LIB_DIR={}", dir.display());
         return;
     }
