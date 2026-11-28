@@ -118,21 +118,37 @@ fn tape_leg_agrees_with_the_document_leg() {
             dom_cols.nulls(col),
             "null drift on {col}"
         );
+        // Null slots carry UNDEFINED lane values (only the null bitmap
+        // is the contract — tests/plan.rs pins the same law), so the
+        // leg agreement is asserted on the FILLED slots only.
+        let nulls = tape_cols.nulls(col);
         match tape_cols.column_kind(col).unwrap() {
             PlanColumnKind::Int | PlanColumnKind::Bool => {
-                assert_eq!(tape_cols.ints(col).unwrap(), dom_cols.ints(col).unwrap())
+                let t = tape_cols.ints(col).unwrap();
+                let d = dom_cols.ints(col).unwrap();
+                for i in 0..nulls.len() {
+                    if nulls[i] == 0 {
+                        assert_eq!(t[i], d[i], "int drift on col {col} row {i}");
+                    }
+                }
             }
             PlanColumnKind::Float => {
-                assert_eq!(
-                    tape_cols.floats(col).unwrap(),
-                    dom_cols.floats(col).unwrap()
-                )
+                let t = tape_cols.floats(col).unwrap();
+                let d = dom_cols.floats(col).unwrap();
+                for i in 0..nulls.len() {
+                    if nulls[i] == 0 {
+                        assert_eq!(t[i], d[i], "float drift on col {col} row {i}");
+                    }
+                }
             }
             PlanColumnKind::Str => {
-                let tape: Vec<_> = tape_cols.strs(col).unwrap();
-                let dom_cells = dom_cols.strs(col).unwrap();
-                let dom: Vec<_> = dom_cells.iter().map(|s| s.as_str()).collect();
-                assert_eq!(tape, dom);
+                let t = tape_cols.strs(col).unwrap();
+                let d_cells = dom_cols.strs(col).unwrap();
+                for i in 0..nulls.len() {
+                    if nulls[i] == 0 {
+                        assert_eq!(t[i], d_cells[i].as_str(), "str drift on col {col} row {i}");
+                    }
+                }
             }
         }
     }
